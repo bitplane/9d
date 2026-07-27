@@ -5,12 +5,12 @@
 #include <limits.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include "namespace.h"
 
 #define nil NULL
 
 /* Global variables */
 extern IxpServer server;
-extern char *root_path;
 extern int debug;
 extern Ixp9Srv p9srv;
 
@@ -23,7 +23,6 @@ typedef struct FidState {
 
 /* Path functions */
 void cleanname(char *name);
-char *getfullpath(const char *path, char *buffer, size_t bufsize);
 int joinpath(char *dst, size_t dstsize, const char *dir, const char *name);
 int safe_strcat(char *dst, const char *src, size_t dstsize);
 
@@ -42,11 +41,16 @@ void fs_flush(Ixp9Req *r);
 void fs_freefid(IxpFid *f);
 
 /* Directory operations */
-void read_directory(Ixp9Req *r, const char *fullpath);
+void read_directory(Ixp9Req *r, const char *path,
+                    const ResolvedPath *resolved);
+void read_synthetic_directory(Ixp9Req *r);
 void read_symlink(Ixp9Req *r, const char *fullpath);
 void read_file(Ixp9Req *r, const char *fullpath);
 
 /* Stat helpers */
-void build_stat(IxpStat *s, const char *path, const char *fullpath, struct stat *st);
+void build_stat(IxpStat *s, const char *path, const char *fullpath,
+                const ResolvedPath *resolved, struct stat *st);
+void build_synthetic_stat(IxpStat *s, const char *name);
+void free_stat_strings(IxpStat *s);
 
 #endif /* SERVER_H */

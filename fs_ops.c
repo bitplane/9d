@@ -6,6 +6,23 @@
 #include <errno.h>
 #include <fcntl.h> // For O_RDONLY, O_WRONLY, O_RDWR, O_APPEND, O_TRUNC
 
+static void set_qid(IxpQid *qid, const ResolvedPath *resolved,
+                    const struct stat *st) {
+    if(resolved->synthetic) {
+        qid->type = P9_QTDIR;
+        qid->path = namespace_root_qid();
+        qid->version = 0;
+        return;
+    }
+    qid->type = P9_QTFILE;
+    if(S_ISDIR(st->st_mode))
+        qid->type = P9_QTDIR;
+    else if(S_ISLNK(st->st_mode))
+        qid->type = P9_QTSYMLINK;
+    qid->path = namespace_qid(resolved, st);
+    qid->version = st->st_mtime;
+}
+
 // fs_attach handles the Tattach Fcall.
 // It initializes a new FidState for the root of the filesystem.
 void fs_attach(Ixp9Req *r) {
@@ -24,29 +41,22 @@ void fs_attach(Ixp9Req *r) {
     state->open_mode = 0;  // Not opened in a specific mode yet
     state->open_flags = 0; // No OS flags yet
 
-    // Set the QID for the root directory
-    // For simplicity, using inode 0 for root, but a real stat might be better
-    // if root_path itself has a stable inode.
-    // However, QID.path for attach is often special.
-    // Let's stat the actual root_path to get its properties.
-    char fullpath_root[PATH_MAX];
+    ResolvedPath resolved;
     struct stat st_root;
-    if (!getfullpath("/", fullpath_root, sizeof(fullpath_root))) {
+    if (namespace_resolve("/", &resolved) < 0) {
          free(state->path);
          free(state);
-         ixp_respond(r, ixp_errbuf());
+         ixp_respond(r, strerror(errno));
          return;
     }
-    if (lstat(fullpath_root, &st_root) < 0) {
+    if (!resolved.synthetic && lstat(resolved.native_path, &st_root) < 0) {
         free(state->path);
         free(state);
         ixp_respond(r, strerror(errno));
         return;
     }
 
-    r->fid->qid.type = P9_QTDIR; // Root is always a directory
-    r->fid->qid.path = st_root.st_ino; 
-    r->fid->qid.version = st_root.st_mtime; 
+    set_qid(&r->fid->qid, &resolved, &st_root);
     r->fid->aux = state;
     r->ofcall.rattach.qid = r->fid->qid;
     ixp_respond(r, nil);
@@ -58,7 +68,7 @@ void fs_walk(Ixp9Req *r) {
     FidState *state = r->fid->aux; // Current FID's state
     FidState *newstate;            // State for the new FID (r->newfid)
     char current_relative_path[PATH_MAX];
-    char fullpath_os[PATH_MAX];    // For lstat
+    ResolvedPath resolved;
     struct stat st;
     int i;
 
@@ -98,35 +108,22 @@ void fs_walk(Ixp9Req *r) {
     for (i = 0; i < r->ifcall.twalk.nwname; i++) {
         const char *name_component = r->ifcall.twalk.wname[i];
 
-        // Append path component
-        if (strcmp(current_relative_path, "/") != 0) { // Avoid "//" for root
-            if (safe_strcat(current_relative_path, "/", PATH_MAX) < 0) {
-                ixp_respond(r, "path too long during walk");
-                // Note: newfid->aux (newstate) needs cleanup if we error out early.
-                // libixp's ixp_requtf GONE might handle freeing newfid and its aux.
-                // For now, assuming libixp handles it on error response.
-                return;
-            }
-        }
-        if (safe_strcat(current_relative_path, name_component, PATH_MAX) < 0) {
+        char next_path[PATH_MAX];
+
+        if(namespace_join_virtual(next_path, sizeof(next_path),
+                                  current_relative_path, name_component) < 0) {
             ixp_respond(r, "path too long during walk");
             return;
         }
-        
-        // Clean the path (e.g. resolve "." and "..")
-        // cleanname modifies in place.
-        // It's important that current_relative_path remains a valid 9P-style path.
-        // cleanname is more for OS paths. For 9P paths, ".." should be handled by server logic.
-        // For now, we assume wname components are valid names, not ".." or ".".
-        // If ".." is encountered, it should be resolved against current_relative_path.
-        // This simple server doesn't fully implement ".." resolution in walk beyond getfullpath.
+        strcpy(current_relative_path, next_path);
 
-        if (!getfullpath(current_relative_path, fullpath_os, sizeof(fullpath_os))) {
-            ixp_respond(r, ixp_errbuf()); // Path became invalid
+        if(namespace_resolve(current_relative_path, &resolved) < 0) {
+            r->ofcall.rwalk.nwqid = i;
+            ixp_respond(r, strerror(errno));
             return;
         }
 
-        if (lstat(fullpath_os, &st) < 0) {
+        if(!resolved.synthetic && lstat(resolved.native_path, &st) < 0) {
             // If any component doesn't exist, walk fails.
             // Respond with error, and number of successful walks (i)
             r->ofcall.rwalk.nwqid = i; // Report how many names were successfully walked
@@ -134,16 +131,7 @@ void fs_walk(Ixp9Req *r) {
             return;
         }
 
-        // Store QID for this successfully walked component
-        r->ofcall.rwalk.wqid[i].path = st.st_ino;
-        r->ofcall.rwalk.wqid[i].version = st.st_mtime;
-        if (S_ISDIR(st.st_mode)) {
-            r->ofcall.rwalk.wqid[i].type = P9_QTDIR;
-        } else if (S_ISLNK(st.st_mode)) {
-            r->ofcall.rwalk.wqid[i].type = P9_QTSYMLINK;
-        } else {
-            r->ofcall.rwalk.wqid[i].type = P9_QTFILE;
-        }
+        set_qid(&r->ofcall.rwalk.wqid[i], &resolved, &st);
     }
 
     // All components walked successfully

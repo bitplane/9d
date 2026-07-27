@@ -7,14 +7,69 @@
 #include <dirent.h>
 #include <errno.h>
 
-void read_directory(Ixp9Req *r, const char *fullpath) {
-    DIR *dir = opendir(fullpath);
+static int pack_entry(Ixp9Req *r, IxpMsg *message, IxpStat *stat,
+                      uint64_t *position) {
+    uint16_t length = ixp_sizeof_stat(stat, ixp_req_getversion(r));
+    uint64_t offset = r->ifcall.tread.offset;
+
+    if(*position + length <= offset) {
+        *position += length;
+        return 0;
+    }
+    if((size_t)(message->end - message->pos) < length)
+        return 1;
+    ixp_pstat(message, stat);
+    *position += length;
+    return 0;
+}
+
+void read_synthetic_directory(Ixp9Req *r) {
+    IxpMsg message;
+    char *buffer;
+    uint64_t position = 0;
+    size_t i;
+
+    buffer = malloc(r->ifcall.tread.count);
+    if(!buffer) {
+        ixp_respond(r, "out of memory");
+        return;
+    }
+    message = ixp_message(buffer, r->ifcall.tread.count, MsgPack);
+    message.version = ixp_req_getversion(r);
+
+    for(i = 0; i < namespace.nroots; i++) {
+        char virtual_path[PATH_MAX];
+        ResolvedPath resolved;
+        struct stat st;
+        IxpStat stat;
+
+        if(snprintf(virtual_path, sizeof(virtual_path), "/%s",
+                    namespace.roots[i].name) >= (int)sizeof(virtual_path))
+            continue;
+        if(namespace_resolve(virtual_path, &resolved) < 0 ||
+           lstat(resolved.native_path, &st) < 0)
+            continue;
+        memset(&stat, 0, sizeof(stat));
+        build_stat(&stat, virtual_path, resolved.native_path, &resolved, &st);
+        if(pack_entry(r, &message, &stat, &position)) {
+            free_stat_strings(&stat);
+            break;
+        }
+        free_stat_strings(&stat);
+    }
+
+    r->ofcall.rread.count = message.pos - buffer;
+    r->ofcall.rread.data = buffer;
+    ixp_respond(r, nil);
+}
+
+void read_directory(Ixp9Req *r, const char *path,
+                    const ResolvedPath *resolved) {
+    DIR *dir = opendir(resolved->native_path);
     struct dirent *de;
     IxpMsg m;
     char *buf = NULL;
-    uint64_t offset = r->ifcall.tread.offset;
     uint64_t pos = 0;
-    int include_parent = 1;  // Include ".." entries but not "."
     
     if (!dir) {
         ixp_respond(r, strerror(errno));
@@ -36,110 +91,33 @@ void read_directory(Ixp9Req *r, const char *fullpath) {
         IxpStat s;
         struct stat st2;
         char childpath[PATH_MAX];
-        uint16_t slen;
+        char virtual_path[PATH_MAX];
+        ResolvedPath child;
         
-        /* Skip "." entry as it's added by the client, but include ".." */
-        if (strcmp(de->d_name, ".") == 0) {
+        /* Clients synthesize dot entries and walk ".." through fs_walk. */
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
             continue;
         }
-        
-        /* Skip ".." entry only if include_parent is 0 */
-        if (!include_parent && strcmp(de->d_name, "..") == 0) {
+
+        if(namespace_join_virtual(virtual_path, sizeof(virtual_path),
+                                  path, de->d_name) < 0)
             continue;
-        }
-        
-        /* Safely construct the full path for the child entry */
-        if (joinpath(childpath, sizeof(childpath), fullpath, de->d_name) < 0) {
-            /* Path would be truncated or other snprintf error, skip this entry */
+        if(namespace_resolve(virtual_path, &child) < 0)
             continue;
-        }
+        strcpy(childpath, child.native_path);
             
         if (lstat(childpath, &st2) < 0) {
             /* Failed to stat the entry, skip it */
             continue;
         }
         
-        /* Build stat structure */
         memset(&s, 0, sizeof(IxpStat));
-        s.type = 0;
-        s.dev = 0;
-        s.qid.type = P9_QTFILE;
-        if (S_ISDIR(st2.st_mode))
-            s.qid.type = P9_QTDIR;
-        else if (S_ISLNK(st2.st_mode))
-            s.qid.type = P9_QTSYMLINK;
-            
-        s.qid.path = st2.st_ino;
-        s.qid.version = st2.st_mtime;
-        s.mode = st2.st_mode & 0777;
-        if (S_ISDIR(st2.st_mode))
-            s.mode |= P9_DMDIR;
-        else if (S_ISLNK(st2.st_mode))
-            s.mode |= P9_DMSYMLINK;
-            
-        s.atime = st2.st_atime;
-        s.mtime = st2.st_mtime;
-        s.length = st2.st_size;
-
-        /* 9P2000.u: symlink extension and numeric IDs */
-        /* extension must be non-NULL for 9P2000.u - empty string for non-symlinks */
-        if (S_ISLNK(st2.st_mode)) {
-            char target[PATH_MAX];
-            ssize_t tlen = readlink(childpath, target, sizeof(target) - 1);
-            if (tlen != -1) {
-                target[tlen] = '\0';
-                s.extension = strdup(target);
-                s.length = tlen;
-            } else {
-                s.extension = strdup("");
-            }
-        } else {
-            s.extension = strdup("");
-        }
-        s.n_uid = st2.st_uid;
-        s.n_gid = st2.st_gid;
-        s.n_muid = st2.st_uid;
-
-        /* Safely handle name assignment */
-        s.name = strdup(de->d_name);
-        if (!s.name) {
-            free((char *)s.extension);
-            continue;
-        }
-        
-        /* Use consistent UID/GID handling */
-        const char *user = getenv("USER");
-        /* Instead of direct assignment, use string constants which libixp will handle properly */
-        s.uid = user ? (char*)user : "none";  /* Cast to remove const warning - libixp will copy this */
-        s.gid = s.uid;
-        s.muid = s.uid;
-        
-        /* Calculate size of this stat entry */
-        slen = ixp_sizeof_stat(&s, ixp_req_getversion(r));
-        
-        /* Skip entries until we reach the offset */
-        if (pos + slen <= offset) {
-            pos += slen;
-            free((char *)s.name);
-            free((char *)s.extension);
-            continue;
-        }
-        
-        /* If this entry won't fit in the buffer, stop */
-        if (m.pos - buf + slen > r->ifcall.tread.count) {
-            free((char *)s.name);
-            free((char *)s.extension);
+        build_stat(&s, virtual_path, childpath, &child, &st2);
+        if(pack_entry(r, &m, &s, &pos)) {
+            free_stat_strings(&s);
             break;
         }
-        
-        /* Add this entry to the result */
-        ixp_pstat(&m, &s);
-
-        /* Free our allocated strings - ixp_pstat makes its own copy */
-        free((char *)s.name);
-        free((char *)s.extension);
-
-        pos += slen;
+        free_stat_strings(&s);
     }
     
     closedir(dir);

@@ -3,7 +3,9 @@ CFLAGS += -g -O0 -D_XOPEN_SOURCE=600 -Ilibixp/include
 LDFLAGS += -static
 LIBS = build/libixp.a -lpthread
 
-SRCS = simple9p.c path.c fs_ops.c fs_io.c fs_stat.c fs_dir.c
+PLATFORM ?= posix
+SRCS = simple9p.c path.c namespace.c platform_$(PLATFORM).c \
+       fs_ops.c fs_io.c fs_stat.c fs_dir.c
 OBJS = $(patsubst %.c,build/%.o,$(SRCS))
 TARGET = build/simple9p
 
@@ -36,7 +38,19 @@ test/9pfuse/build/9pfuse:
 	fi
 	cd test/9pfuse && meson setup build && meson compile -C build
 
-test: $(TARGET) test/9pfuse/build/9pfuse
+test: test-namespace $(TARGET) test/9pfuse/build/9pfuse
 	cd test && ./run.sh
 
-.PHONY: all clean libixp test
+test-namespace: build/namespace_test
+	./build/namespace_test
+
+build/namespace_test: test/namespace_test.c namespace.c namespace.h path.c server.h | build
+	$(CC) $(CFLAGS) -o $@ test/namespace_test.c namespace.c path.c
+
+build/simple9p-synthetic: simple9p.c path.c namespace.c test/platform_synthetic.c \
+                         fs_ops.c fs_io.c fs_stat.c fs_dir.c server.h namespace.h \
+                         libixp | build
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ simple9p.c path.c namespace.c \
+		test/platform_synthetic.c fs_ops.c fs_io.c fs_stat.c fs_dir.c $(LIBS)
+
+.PHONY: all clean libixp test test-namespace

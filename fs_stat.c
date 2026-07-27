@@ -12,7 +12,8 @@
 // path: The relative 9P path of the file.
 // fullpath: The absolute OS path of the file.
 // st: The struct stat obtained from lstat() on fullpath.
-void build_stat(IxpStat *s, const char *path, const char *fullpath, struct stat *st) {
+void build_stat(IxpStat *s, const char *path, const char *fullpath,
+                const ResolvedPath *resolved, struct stat *st) {
     char *name_component = NULL;
     char *path_copy_for_basename = NULL;
 
@@ -29,7 +30,7 @@ void build_stat(IxpStat *s, const char *path, const char *fullpath, struct stat 
     }
 
     // QID path and version
-    s->qid.path = st->st_ino;       // Use inode number for path component of QID
+    s->qid.path = namespace_qid(resolved, st);
     s->qid.version = st->st_mtime;  // Use modification time for version
 
     // Mode: 9P permissions and directory/symlink flags
@@ -95,6 +96,21 @@ void build_stat(IxpStat *s, const char *path, const char *fullpath, struct stat 
     s->muid = strdup(s->uid); // Last modifier same as uid
 }
 
+void build_synthetic_stat(IxpStat *s, const char *name) {
+    memset(s, 0, sizeof(*s));
+    s->qid.type = P9_QTDIR;
+    s->qid.path = namespace_root_qid();
+    s->mode = P9_DMDIR | 0555;
+    s->name = strdup(name);
+    s->uid = strdup("none");
+    s->gid = strdup("none");
+    s->muid = strdup("none");
+    s->extension = strdup("");
+    s->n_uid = (uint32_t)~0;
+    s->n_gid = (uint32_t)~0;
+    s->n_muid = (uint32_t)~0;
+}
+
 // Helper to free allocated strings in IxpStat
 void free_stat_strings(IxpStat *s) {
     if (s->name) free((char*)s->name);
@@ -107,7 +123,7 @@ void free_stat_strings(IxpStat *s) {
 // fs_stat handles Tstat messages.
 void fs_stat(Ixp9Req *r) {
     FidState *state = r->fid->aux;
-    char fullpath[PATH_MAX];
+    ResolvedPath resolved;
     struct stat st_os; // OS stat structure
     IxpStat s_ixp;     // 9P stat structure
     IxpMsg m;
@@ -118,19 +134,22 @@ void fs_stat(Ixp9Req *r) {
         return;
     }
 
-    if (!getfullpath(state->path, fullpath, sizeof(fullpath))) {
-        // getfullpath calls ixp_werrstr, so just return
-        ixp_respond(r, ixp_errbuf());
+    if (namespace_resolve(state->path, &resolved) < 0) {
+        ixp_respond(r, strerror(errno));
         return;
     }
 
-    if (lstat(fullpath, &st_os) < 0) {
+    if (!resolved.synthetic && lstat(resolved.native_path, &st_os) < 0) {
         ixp_respond(r, strerror(errno));
         return;
     }
 
     memset(&s_ixp, 0, sizeof(IxpStat)); // Zero out the structure
-    build_stat(&s_ixp, state->path, fullpath, &st_os);
+    if(resolved.synthetic)
+        build_synthetic_stat(&s_ixp, "/");
+    else
+        build_stat(&s_ixp, state->path, resolved.native_path, &resolved,
+                   &st_os);
 
     size_of_ixp_stat = ixp_sizeof_stat(&s_ixp, ixp_req_getversion(r));
     r->ofcall.rstat.nstat = size_of_ixp_stat;
@@ -142,7 +161,7 @@ void fs_stat(Ixp9Req *r) {
         return;
     }
 
-    m = ixp_message(r->ofcall.rstat.stat, size_of_ixp_stat, MsgPack);
+    m = ixp_message((char *)r->ofcall.rstat.stat, size_of_ixp_stat, MsgPack);
     m.version = ixp_req_getversion(r);
     ixp_pstat(&m, &s_ixp);
 
@@ -156,7 +175,7 @@ void fs_stat(Ixp9Req *r) {
 // fs_wstat handles Twstat messages.
 void fs_wstat(Ixp9Req *r) {
     FidState *state = r->fid->aux;
-    char fullpath[PATH_MAX];
+    ResolvedPath resolved;
     IxpStat *s_new = &r->ifcall.twstat.stat; // The new stat data from client
     struct stat current_st_os;               // Current OS attributes of the file
     int respond_early = 0;
@@ -174,12 +193,16 @@ void fs_wstat(Ixp9Req *r) {
         return;
     }
 
-    if (!getfullpath(state->path, fullpath, sizeof(fullpath))) {
-        ixp_respond(r, ixp_errbuf());
+    if(namespace_is_protected(state->path)) {
+        ixp_respond(r, strerror(EPERM));
+        return;
+    }
+    if (namespace_resolve(state->path, &resolved) < 0) {
+        ixp_respond(r, strerror(errno));
         return;
     }
 
-    if (lstat(fullpath, &current_st_os) < 0) {
+    if (lstat(resolved.native_path, &current_st_os) < 0) {
         ixp_respond(r, strerror(errno));
         return;
     }
@@ -208,7 +231,7 @@ void fs_wstat(Ixp9Req *r) {
                     ixp_respond(r, strerror(EFBIG));
                     respond_early = 1;
                 } else {
-                    if (truncate(fullpath, (off_t)s_new->length) < 0) {
+                    if (truncate(resolved.native_path, (off_t)s_new->length) < 0) {
                         ixp_respond(r, strerror(errno));
                         respond_early = 1;
                     }
@@ -225,7 +248,7 @@ void fs_wstat(Ixp9Req *r) {
     if (s_new->mode != (uint32_t)~0) {
         mode_t requested_perms = s_new->mode & 0777; // Apply only permission bits
         if (requested_perms != (current_st_os.st_mode & 0777)) {
-            if (chmod(fullpath, requested_perms) < 0) {
+            if (chmod(resolved.native_path, requested_perms) < 0) {
                 ixp_respond(r, strerror(errno));
                 respond_early = 1;
             }
@@ -238,7 +261,6 @@ void fs_wstat(Ixp9Req *r) {
     // Handle name changes (rename)
     // s_new->name being NULL or empty means "don't change name".
     if (s_new->name != NULL && s_new->name[0] != '\0') {
-        char current_basename_buf[PATH_MAX];
         char *current_basename;
         char *path_copy_for_basename;
 
@@ -271,11 +293,13 @@ void fs_wstat(Ixp9Req *r) {
                     }
                     free(original_path_copy_for_dirname);
 
-                    if (!getfullpath(new_relative_path, new_absolute_fullpath, sizeof(new_absolute_fullpath))) {
-                        ixp_respond(r, ixp_errbuf());
+                    ResolvedPath renamed;
+                    if (namespace_resolve(new_relative_path, &renamed) < 0) {
+                        ixp_respond(r, strerror(errno));
                         respond_early = 1;
                     } else {
-                        if (rename(fullpath, new_absolute_fullpath) < 0) {
+                        strcpy(new_absolute_fullpath, renamed.native_path);
+                        if (rename(resolved.native_path, new_absolute_fullpath) < 0) {
                             ixp_respond(r, strerror(errno));
                             respond_early = 1;
                         } else {

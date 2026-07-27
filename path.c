@@ -57,34 +57,6 @@ void cleanname(char *name) {
     *q = '\0';
 }
 
-/* Helper to build full path - now thread-safe and secure */
-char *getfullpath(const char *path, char *buffer, size_t bufsize) {
-    char cleaned[PATH_MAX];
-    
-    if(!path || !buffer || bufsize < PATH_MAX) {
-        return NULL;
-    }
-    
-    /* Copy and clean the path */
-    strncpy(cleaned, path, PATH_MAX-1);
-    cleaned[PATH_MAX-1] = '\0';
-    cleanname(cleaned);
-    
-    /* Check for directory traversal attempts */
-    if(strstr(cleaned, "../") != NULL) {
-        ixp_werrstr("Invalid path: directory traversal attempt");
-        return NULL;
-    }
-    
-    /* Build the full path */
-    if(joinpath(buffer, bufsize, root_path, cleaned) < 0) {
-        ixp_werrstr("Path too long");
-        return NULL;
-    }
-    
-    return buffer;
-}
-
 /*
  * Join host paths without assuming that a root ends in '/'. Amiga-style
  * volume roots, such as "SYS:", already contain their path separator.
@@ -104,7 +76,7 @@ int joinpath(char *dst, size_t dstsize, const char *dir, const char *name) {
         separator = "/";
     }
 
-    if(snprintf(dst, dstsize, "%s%s%s", dir, separator, name) >= dstsize)
+    if(snprintf(dst, dstsize, "%s%s%s", dir, separator, name) >= (int)dstsize)
         return -1;
     return 0;
 }

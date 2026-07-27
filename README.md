@@ -6,6 +6,17 @@ Built for [qemount](https://github.com/bitplane/qemount)
 
 Uses [libixp](https://github.com/0intro/libixp)
 
+## Usage
+
+```text
+simple9p [-d] [-p address] [directory]
+```
+
+An explicit directory serves that directory as before. Without one, simple9p
+serves the platform's filesystem namespace: `/` on Unix-like systems, or a
+startup snapshot of mounted volumes beneath a synthetic `/` on Amiga-like
+systems. The namespace remains fixed for the life of the server.
+
 ## Status
 
 This will eventually evolve into the default `qemount`'s back-end, unless I

@@ -9,7 +9,6 @@
 
 /* Global variables */
 IxpServer server;
-char *root_path = NULL;
 int debug = 0;
 static int stream_fd;
 static IxpThread stream_thread;
@@ -80,7 +79,7 @@ static void serve_stream(int fd) {
 }
 
 static void usage(const char *prog) {
-    fprintf(stderr, "Usage: %s [-d] [-h] [-p address] <directory>\n", prog);
+    fprintf(stderr, "Usage: %s [-d] [-h] [-p address] [directory]\n", prog);
     fprintf(stderr, "  -d          Enable debug output\n");
     fprintf(stderr, "  -h          Show this help\n");
     fprintf(stderr, "  -p address  Use '-' for a bidirectional stdin stream\n");
@@ -89,6 +88,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "              Otherwise listen on a libixp network address\n");
     fprintf(stderr, "              (default: tcp!*!564)\n");
 #endif
+    fprintf(stderr, "  directory   Root to serve (default: platform namespace)\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -112,22 +112,14 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if(optind >= argc) {
+    if(optind + 1 < argc) {
         usage(argv[0]);
         exit(1);
     }
-    
-    root_path = argv[optind];
-    
-    /* Check if root_path exists and is a directory */
-    struct stat root_st;
-    if(stat(root_path, &root_st) < 0) {
-        fprintf(stderr, "Cannot stat root directory %s: %s\n", root_path, strerror(errno));
-        exit(1);
-    }
-    
-    if(!S_ISDIR(root_st.st_mode)) {
-        fprintf(stderr, "Root path %s is not a directory\n", root_path);
+
+    if(namespace_init(optind < argc ? argv[optind] : NULL) < 0) {
+        fprintf(stderr, "Cannot initialize served namespace: %s\n",
+                strerror(errno));
         exit(1);
     }
     
@@ -143,7 +135,7 @@ int main(int argc, char *argv[]) {
     }
     
     if(debug)
-        fprintf(stderr, "Starting 9P server on %s for %s\n", addr, root_path);
+        fprintf(stderr, "Starting 9P server on %s\n", addr);
 
     /* Check for stdio mode */
     if(strcmp(addr, "-") == 0) {
@@ -160,6 +152,7 @@ int main(int argc, char *argv[]) {
         /* Serve on stdin/stdout */
         serve_stream(fd);
 
+        namespace_cleanup();
         return 0;
     }
 
@@ -208,5 +201,6 @@ int main(int argc, char *argv[]) {
     }
 #endif
     
+    namespace_cleanup();
     return 0;
 }
