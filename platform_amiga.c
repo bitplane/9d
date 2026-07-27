@@ -35,15 +35,19 @@ static VolumeName *snapshot_names(void) {
 
     entry = list;
     while((entry = NextDosEntry(entry, LDF_VOLUMES)) != NULL) {
-        const unsigned char *bstr = (const unsigned char *)BADDR(entry->dol_Name);
-        size_t length = bstr[0];
-        VolumeName *volume = malloc(sizeof(*volume));
+        const char *name = AROS_BSTR_ADDR(entry->dol_Name);
+        size_t length = AROS_BSTR_strlen(entry->dol_Name);
+        VolumeName *volume;
+
+        if(length >= sizeof(volume->name))
+            continue;
+        volume = malloc(sizeof(*volume));
         if(!volume) {
             UnLockDosList(LDF_VOLUMES | LDF_READ);
             free_names(head);
             return NULL;
         }
-        memcpy(volume->name, bstr + 1, length);
+        memcpy(volume->name, name, length);
         volume->name[length] = '\0';
         volume->next = NULL;
         *tail = volume;
