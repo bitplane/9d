@@ -5,7 +5,6 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <libgen.h> // For dirname
 
 // fs_read handles Tread Fcall messages.
 // It determines if the path is a directory, symlink, or regular file

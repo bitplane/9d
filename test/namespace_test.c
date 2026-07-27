@@ -15,7 +15,14 @@ int platform_namespace_init(Namespace *ns) {
 
 static void test_native_namespace(const char *root) {
     ResolvedPath resolved;
+    char parent[PATH_MAX];
 
+    assert(strcmp(path_basename("/volume/file"), "file") == 0);
+    assert(strcmp(path_basename("/volume"), "volume") == 0);
+    assert(path_parent("/volume/file", parent, sizeof(parent)) == 0);
+    assert(strcmp(parent, "/volume") == 0);
+    assert(path_parent("/volume", parent, sizeof(parent)) == 0);
+    assert(strcmp(parent, "/") == 0);
     assert(namespace_init(root) == 0);
     assert(namespace.synthetic == 0);
     assert(namespace_resolve("/child", &resolved) == 0);

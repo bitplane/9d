@@ -23,6 +23,8 @@ typedef struct FidState {
 
 /* Path functions */
 void cleanname(char *name);
+const char *path_basename(const char *path);
+int path_parent(const char *path, char *parent, size_t size);
 int joinpath(char *dst, size_t dstsize, const char *dir, const char *name);
 int safe_strcat(char *dst, const char *src, size_t dstsize);
 

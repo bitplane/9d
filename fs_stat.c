@@ -4,7 +4,6 @@
 #include <string.h>
 #include <unistd.h> // For truncate, chmod, readlink
 #include <errno.h>
-#include <libgen.h> // For basename
 #include <limits.h> // For LONG_MAX
 
 // build_stat populates an IxpStat structure from a file's stat data.
@@ -14,9 +13,6 @@
 // st: The struct stat obtained from lstat() on fullpath.
 void build_stat(IxpStat *s, const char *path, const char *fullpath,
                 const ResolvedPath *resolved, struct stat *st) {
-    char *name_component = NULL;
-    char *path_copy_for_basename = NULL;
-
     // Initialize basic fields
     s->type = 0; // Typically 0 for 9P2000
     s->dev = 0;  // Typically 0 for 9P2000
@@ -75,17 +71,7 @@ void build_stat(IxpStat *s, const char *path, const char *fullpath,
     if (strcmp(path, "/") == 0) {
         s->name = strdup("/"); // Allocate a new copy to be consistent with other cases
     } else {
-        path_copy_for_basename = strdup(path);
-        if (path_copy_for_basename) {
-            name_component = basename(path_copy_for_basename);
-            s->name = strdup(name_component); // Duplicate basename result for safety
-                                              // libixp will manage freeing this if it takes ownership
-                                              // or if it copies the content during packing.
-            free(path_copy_for_basename);
-        } else {
-            // Fallback if strdup fails - this is not ideal
-            s->name = strdup("error_name"); // Still allocate to maintain consistency
-        }
+        s->name = strdup(path_basename(path));
     }
 
     // User and group names
@@ -261,38 +247,23 @@ void fs_wstat(Ixp9Req *r) {
     // Handle name changes (rename)
     // s_new->name being NULL or empty means "don't change name".
     if (s_new->name != NULL && s_new->name[0] != '\0') {
-        char *current_basename;
-        char *path_copy_for_basename;
+        const char *current_basename = path_basename(state->path);
 
-        path_copy_for_basename = strdup(state->path);
-        if (!path_copy_for_basename) {
-             ixp_respond(r, "out of memory for wstat rename check");
-             respond_early = 1;
-        } else {
-            current_basename = basename(path_copy_for_basename);
             // Check if the new name is actually different from the current one.
             if (strcmp(current_basename, s_new->name) != 0) {
                 char new_relative_path[PATH_MAX];
                 char new_absolute_fullpath[PATH_MAX];
-                char *dir_part_copy; // dirname can modify its input
-                char *original_path_copy_for_dirname;
+                char parent[PATH_MAX];
 
-                original_path_copy_for_dirname = strdup(state->path);
-                if (!original_path_copy_for_dirname) {
-                    ixp_respond(r, "out of memory for wstat rename");
+                if(path_parent(state->path, parent, sizeof(parent)) < 0) {
+                    ixp_respond(r, "path too long for wstat rename");
+                    respond_early = 1;
+                } else if(namespace_join_virtual(
+                              new_relative_path, sizeof(new_relative_path),
+                              parent, s_new->name) < 0) {
+                    ixp_respond(r, "invalid name for wstat rename");
                     respond_early = 1;
                 } else {
-                    dir_part_copy = dirname(original_path_copy_for_dirname);
-
-                    if (strcmp(dir_part_copy, ".") == 0 && strchr(state->path, '/') == NULL) {
-                        snprintf(new_relative_path, sizeof(new_relative_path), "%s", s_new->name);
-                    } else if (strcmp(dir_part_copy, "/") == 0) {
-                        snprintf(new_relative_path, sizeof(new_relative_path), "/%s", s_new->name);
-                    } else {
-                        snprintf(new_relative_path, sizeof(new_relative_path), "%s/%s", dir_part_copy, s_new->name);
-                    }
-                    free(original_path_copy_for_dirname);
-
                     ResolvedPath renamed;
                     if (namespace_resolve(new_relative_path, &renamed) < 0) {
                         ixp_respond(r, strerror(errno));
@@ -320,8 +291,6 @@ void fs_wstat(Ixp9Req *r) {
                     }
                 }
             }
-            free(path_copy_for_basename);
-        }
     }
 
     if (respond_early)
