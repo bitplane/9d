@@ -11,6 +11,8 @@
 IxpServer server;
 char *root_path = NULL;
 int debug = 0;
+static int stream_fd;
+static IxpThread stream_thread;
 
 /* 9P server operations */
 Ixp9Srv p9srv = {
@@ -28,31 +30,65 @@ Ixp9Srv p9srv = {
     .freefid = fs_freefid,
 };
 
-/* Handle device/stdio connection directly */
-static void serve_device(int fd) {
+/*
+ * A connected stream has exactly one possible source of input. Mark it ready
+ * and let libixp's read block until a complete request arrives. This supports
+ * streams, such as serial devices, which cannot be polled by the host OS.
+ */
+static int stream_select(int nfds, fd_set *readfds, fd_set *writefds,
+                         fd_set *exceptfds, struct timeval *timeout) {
+    (void)nfds;
+    (void)writefds;
+    (void)exceptfds;
+    (void)timeout;
+
+    if(readfds && FD_ISSET(stream_fd, readfds)) {
+        FD_ZERO(readfds);
+        FD_SET(stream_fd, readfds);
+        return 1;
+    }
+    return 0;
+}
+
+static void stop_without_connection(IxpServer *srv) {
+    if(!srv->conn)
+        srv->running = 0;
+}
+
+/* Handle one already-connected stream directly. */
+static void serve_stream(int fd) {
     if(debug)
-        fprintf(stderr, "serve_device: Starting with fd=%d\n", fd);
+        fprintf(stderr, "serve_stream: Starting with fd=%d\n", fd);
+
+    stream_fd = fd;
+    stream_thread = *ixp_thread;
+    stream_thread.select = stream_select;
+    ixp_thread = &stream_thread;
+    server.preselect = stop_without_connection;
 
     /* Set up 9P service on the already-connected fd */
     ixp_serve9conn_fd(&server, fd, &p9srv);
 
     if(debug)
-        fprintf(stderr, "serve_device: Entering server loop\n");
+        fprintf(stderr, "serve_stream: Entering server loop\n");
 
     /* Run the server event loop */
     ixp_serverloop(&server);
 
     if(debug)
-        fprintf(stderr, "serve_device: Connection closed\n");
+        fprintf(stderr, "serve_stream: Connection closed\n");
 }
 
 static void usage(const char *prog) {
     fprintf(stderr, "Usage: %s [-d] [-h] [-p address] <directory>\n", prog);
     fprintf(stderr, "  -d          Enable debug output\n");
     fprintf(stderr, "  -h          Show this help\n");
-    fprintf(stderr, "  -p address  Listen address (default: tcp!*!564)\n");
-    fprintf(stderr, "              Use '-' for stdio mode\n");
-    fprintf(stderr, "              Use /dev/path for character device\n");
+    fprintf(stderr, "  -p address  Use '-' for a bidirectional stdin stream\n");
+    fprintf(stderr, "              Use stream!path for a connected stream device\n");
+#ifndef SIMPLE9P_NO_NETWORK
+    fprintf(stderr, "              Otherwise listen on a libixp network address\n");
+    fprintf(stderr, "              (default: tcp!*!564)\n");
+#endif
 }
 
 int main(int argc, char *argv[]) {
@@ -98,7 +134,12 @@ int main(int argc, char *argv[]) {
     int fd;
     
     if(!addr) {
+#ifdef SIMPLE9P_NO_NETWORK
+        usage(argv[0]);
+        exit(1);
+#else
         addr = "tcp!*!564";
+#endif
     }
     
     if(debug)
@@ -117,32 +158,33 @@ int main(int argc, char *argv[]) {
         server.aux = &p9srv;
 
         /* Serve on stdin/stdout */
-        serve_device(fd);
+        serve_stream(fd);
 
         return 0;
     }
 
-    /* Check if addr is a device file */
-    struct stat st;
-    if(stat(addr, &st) == 0 && S_ISCHR(st.st_mode)) {
-        /* It's a character device - open it directly */
-        fd = open(addr, O_RDWR);
+    /* Open an explicitly named connected stream. */
+    if(strncmp(addr, "stream!", 7) == 0 && addr[7] != '\0') {
+        fd = open(addr + 7, O_RDWR);
         if(fd < 0) {
-            fprintf(stderr, "Failed to open device %s: %s\n", addr, strerror(errno));
+            fprintf(stderr, "Failed to open stream %s: %s\n",
+                    addr + 7, strerror(errno));
             exit(1);
         }
         if(debug)
-            fprintf(stderr, "Opened device %s as fd %d\n", addr, fd);
+            fprintf(stderr, "Opened stream %s as fd %d\n", addr + 7, fd);
         
         /* Initialize server structure */
         memset(&server, 0, sizeof(server));
         server.aux = &p9srv;
         
-        /* Serve the device connection directly */
-        serve_device(fd);
+        /* Serve the connected stream directly */
+        serve_stream(fd);
         
         close(fd);
-    } else {
+    }
+#ifndef SIMPLE9P_NO_NETWORK
+    else {
         /* Try as network address */
         fd = ixp_announce(addr);
         if(fd < 0) {
@@ -159,6 +201,12 @@ int main(int argc, char *argv[]) {
         /* Run server loop */
         ixp_serverloop(&server);
     }
+#else
+    else {
+        fprintf(stderr, "Network transports are not available in this build\n");
+        exit(1);
+    }
+#endif
     
     return 0;
 }
