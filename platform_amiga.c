@@ -37,8 +37,12 @@ static VolumeName *snapshot_names(void) {
     while((entry = NextDosEntry(entry, LDF_VOLUMES)) != NULL) {
         const unsigned char *bstr = (const unsigned char *)BADDR(entry->dol_Name);
         size_t length = bstr[0];
-        VolumeName *volume = malloc(sizeof(*volume));
+        VolumeName *volume;
 
+        /* Offline removable volumes remain in the DOS list without a task. */
+        if(!entry->dol_Task)
+            continue;
+        volume = malloc(sizeof(*volume));
         if(!volume) {
             UnLockDosList(LDF_VOLUMES | LDF_READ);
             free_names(head);
