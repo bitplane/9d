@@ -24,6 +24,7 @@ typedef struct FidState {
 /* Path functions */
 void cleanname(char *name);
 char *getfullpath(const char *path, char *buffer, size_t bufsize);
+int joinpath(char *dst, size_t dstsize, const char *dir, const char *name);
 int safe_strcat(char *dst, const char *src, size_t dstsize);
 
 /* Filesystem operations */

@@ -49,8 +49,7 @@ void read_directory(Ixp9Req *r, const char *fullpath) {
         }
         
         /* Safely construct the full path for the child entry */
-        int path_len = snprintf(childpath, sizeof(childpath), "%s/%s", fullpath, de->d_name);
-        if (path_len >= sizeof(childpath) || path_len < 0) {
+        if (joinpath(childpath, sizeof(childpath), fullpath, de->d_name) < 0) {
             /* Path would be truncated or other snprintf error, skip this entry */
             continue;
         }

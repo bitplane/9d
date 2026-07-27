@@ -77,12 +77,36 @@ char *getfullpath(const char *path, char *buffer, size_t bufsize) {
     }
     
     /* Build the full path */
-    if(snprintf(buffer, bufsize, "%s%s", root_path, cleaned) >= bufsize) {
+    if(joinpath(buffer, bufsize, root_path, cleaned) < 0) {
         ixp_werrstr("Path too long");
         return NULL;
     }
     
     return buffer;
+}
+
+/*
+ * Join host paths without assuming that a root ends in '/'. Amiga-style
+ * volume roots, such as "SYS:", already contain their path separator.
+ */
+int joinpath(char *dst, size_t dstsize, const char *dir, const char *name) {
+    size_t dirlen;
+    const char *separator = "";
+
+    if(!dst || !dir || !name || dstsize == 0)
+        return -1;
+
+    dirlen = strlen(dir);
+    if(dirlen > 0 && (dir[dirlen - 1] == '/' || dir[dirlen - 1] == ':')) {
+        while(*name == '/')
+            name++;
+    } else if(*name != '/') {
+        separator = "/";
+    }
+
+    if(snprintf(dst, dstsize, "%s%s%s", dir, separator, name) >= dstsize)
+        return -1;
+    return 0;
 }
 
 /* Safe string operations */
