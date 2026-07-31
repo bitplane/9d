@@ -59,12 +59,12 @@ test-namespace: build/namespace_test
 	./build/namespace_test
 
 build/namespace_test: test/namespace_test.c namespace.c namespace.h path.c server.h | build
-	$(CC) $(CFLAGS) -o $@ test/namespace_test.c namespace.c path.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test/namespace_test.c namespace.c path.c
 
 build/simple9p-synthetic: simple9p.c path.c namespace.c test/platform_synthetic.c \
-                         fs_ops.c fs_io.c fs_stat.c fs_dir.c server.h namespace.h \
-                         libixp | build
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ simple9p.c path.c namespace.c \
+						 fs_ops.c fs_io.c fs_stat.c fs_dir.c server.h namespace.h \
+						 libixp | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ simple9p.c path.c namespace.c \
 		test/platform_synthetic.c fs_ops.c fs_io.c fs_stat.c fs_dir.c $(LIBS)
 
 .PHONY: all clean libixp test test-build-options test-namespace
