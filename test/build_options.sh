@@ -15,7 +15,7 @@ make NETWORK=1 >/dev/null
 nm build/simple9p | grep -q '[[:space:]]ixp_announce$'
 
 make clean >/dev/null
-make NETWORK=0 >/dev/null
+make NETWORK=0 CFLAGS=-Os >/dev/null
 if ./build/simple9p -h 2>&1 \
 		| grep -q 'Otherwise listen on a libixp network address'; then
 	echo 'Network help present in NETWORK=0 build' >&2

@@ -1,11 +1,12 @@
 CC ?= gcc
-CFLAGS += -g -O0 -D_XOPEN_SOURCE=600 -Ilibixp/include
+CPPFLAGS += -D_XOPEN_SOURCE=600 -Ilibixp/include
+CFLAGS += -g -O0
 LDFLAGS += -static
 LIBS = build/libixp.a -lpthread
 
 NETWORK ?= 1
 ifeq ($(NETWORK),0)
-CFLAGS += -DSIMPLE9P_NO_NETWORK
+CPPFLAGS += -DSIMPLE9P_NO_NETWORK
 else ifneq ($(NETWORK),1)
 $(error NETWORK must be 0 or 1)
 endif
@@ -22,7 +23,7 @@ $(TARGET): $(OBJS) libixp
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 
 build/%.o: %.c server.h | build
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 build:
 	mkdir -p build
@@ -30,7 +31,7 @@ build:
 libixp: | build
 	cd libixp/lib/libixp && \
 	for f in convert.c error.c map.c message.c request.c rpc.c server.c socket.c transport.c util.c timer.c client.c thread.c; do \
-		$(CC) $(CFLAGS) -I../../include -c $$f -o $$(pwd)/../../../build/$${f%.c}.o || exit 1; \
+		$(CC) $(CPPFLAGS) $(CFLAGS) -I../../include -c $$f -o $$(pwd)/../../../build/$${f%.c}.o || exit 1; \
 	done
 	ar rcs build/libixp.a build/convert.o build/error.o build/map.o build/message.o \
 		build/request.o build/rpc.o build/server.o build/socket.o build/transport.o \
