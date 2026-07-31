@@ -3,6 +3,13 @@ CFLAGS += -g -O0 -D_XOPEN_SOURCE=600 -Ilibixp/include
 LDFLAGS += -static
 LIBS = build/libixp.a -lpthread
 
+NETWORK ?= 1
+ifeq ($(NETWORK),0)
+CFLAGS += -DSIMPLE9P_NO_NETWORK
+else ifneq ($(NETWORK),1)
+$(error NETWORK must be 0 or 1)
+endif
+
 PLATFORM ?= posix
 SRCS = simple9p.c path.c namespace.c platform_$(PLATFORM).c \
        fs_ops.c fs_io.c fs_stat.c fs_dir.c
@@ -38,8 +45,14 @@ test/9pfuse/build/9pfuse:
 	fi
 	cd test/9pfuse && meson setup build && meson compile -C build
 
-test: test-namespace $(TARGET) test/9pfuse/build/9pfuse
+test: test/9pfuse/build/9pfuse
+	$(MAKE) test-build-options
+	$(MAKE) test-namespace
+	$(MAKE) $(TARGET)
 	cd test && ./run.sh
+
+test-build-options:
+	./test/build_options.sh
 
 test-namespace: build/namespace_test
 	./build/namespace_test
@@ -53,4 +66,4 @@ build/simple9p-synthetic: simple9p.c path.c namespace.c test/platform_synthetic.
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ simple9p.c path.c namespace.c \
 		test/platform_synthetic.c fs_ops.c fs_io.c fs_stat.c fs_dir.c $(LIBS)
 
-.PHONY: all clean libixp test test-namespace
+.PHONY: all clean libixp test test-build-options test-namespace
