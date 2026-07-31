@@ -6,6 +6,13 @@ Built for [qemount](https://github.com/bitplane/qemount)
 
 Uses [libixp](https://github.com/0intro/libixp)
 
+## Building
+
+Run `make` to build a server with connected-stream and network transports.
+For guests that only use an already-connected stream, such as a serial port,
+build with `make NETWORK=0`. This omits the network transport without changing
+the resulting program name.
+
 ## Status
 
 This will eventually evolve into the default `qemount`'s back-end, unless I
