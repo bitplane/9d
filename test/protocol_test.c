@@ -58,6 +58,18 @@ static void expect_type(const char *operation, IxpFcall *response,
         fail_response(operation, response);
 }
 
+static void expect_error(const char *operation, IxpFcall *response,
+                         int error) {
+    expect_type(operation, response, P9_RError);
+    if(strcmp(response->error.ename, strerror(error)) != 0 ||
+       response->error.uerrno != (uint32_t)error) {
+        fprintf(stderr, "%s: expected %s (%d), got %s (%u)\n",
+                operation, strerror(error), error, response->error.ename,
+                response->error.uerrno);
+        abort();
+    }
+}
+
 static void version(Client *client) {
     IxpFcall request = {0};
     IxpFcall response;
@@ -167,6 +179,14 @@ static IxpFcall clunk(Client *client, uint32_t fid) {
     return rpc(client, &request);
 }
 
+static IxpFcall remove_fid(Client *client, uint32_t fid) {
+    IxpFcall request = {0};
+
+    request.hdr.type = P9_TRemove;
+    request.hdr.fid = fid;
+    return rpc(client, &request);
+}
+
 static IxpStat unchanged_stat(void) {
     IxpStat stat;
 
@@ -200,6 +220,24 @@ static IxpFcall wstat_fid(Client *client, uint32_t fid, IxpStat *stat) {
     return rpc(client, &request);
 }
 
+static IxpQid stat_qid(Client *client, uint32_t fid) {
+    IxpFcall response;
+    IxpStat stat = {0};
+    IxpMsg message;
+    IxpQid qid;
+
+    response = stat_fid(client, fid);
+    expect_type("stat qid", &response, P9_RStat);
+    message = ixp_message((char *)response.rstat.stat,
+                          response.rstat.nstat, MsgUnpack);
+    message.version = client->version;
+    ixp_pstat(&message, &stat);
+    qid = stat.qid;
+    ixp_freestat(&stat);
+    ixp_freefcall(&response);
+    return qid;
+}
+
 static void write_file(const char *path, const char *data) {
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     size_t length = strlen(data);
@@ -209,13 +247,34 @@ static void write_file(const char *path, const char *data) {
     assert(close(fd) == 0);
 }
 
+static void write_pattern_file(const char *path, size_t length) {
+    char buffer[1024];
+    size_t written = 0;
+    size_t index;
+    int fd;
+
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    assert(fd >= 0);
+    while(written < length) {
+        size_t count = length - written;
+
+        if(count > sizeof(buffer))
+            count = sizeof(buffer);
+        for(index = 0; index < count; index++)
+            buffer[index] = (char)('a' + (written + index) % 26);
+        assert(write(fd, buffer, count) == (ssize_t)count);
+        written += count;
+    }
+    assert(close(fd) == 0);
+}
+
 static void make_path(char *buffer, size_t size, const char *root,
                       const char *name) {
     assert(snprintf(buffer, size, "%s/%s", root, name) < (int)size);
 }
 
-static pid_t start_server(const char *binary, const char *root,
-                          Client *client) {
+static pid_t start_server_mode(const char *binary, const char *root,
+                               Client *client, int read_only) {
     int sockets[2];
     pid_t child;
 
@@ -226,7 +285,10 @@ static pid_t start_server(const char *binary, const char *root,
         close(sockets[0]);
         assert(dup2(sockets[1], STDIN_FILENO) == STDIN_FILENO);
         close(sockets[1]);
-        execl(binary, binary, "-p", "-", root, (char *)NULL);
+        if(read_only)
+            execl(binary, binary, "-r", "-p", "-", root, (char *)NULL);
+        else
+            execl(binary, binary, "-p", "-", root, (char *)NULL);
         _exit(127);
     }
     close(sockets[1]);
@@ -236,6 +298,11 @@ static pid_t start_server(const char *binary, const char *root,
     version(client);
     attach(client, 1);
     return child;
+}
+
+static pid_t start_server(const char *binary, const char *root,
+                          Client *client) {
+    return start_server_mode(binary, root, client, 0);
 }
 
 static void stop_server(Client *client, pid_t child) {
@@ -274,7 +341,7 @@ static void test_walks(Client *client) {
     ixp_freefcall(&response);
 
     response = walk(client, 1, 4, invalid, 1);
-    expect_type("invalid component", &response, P9_RError);
+    expect_error("invalid component", &response, EINVAL);
     ixp_freefcall(&response);
 }
 
@@ -426,6 +493,56 @@ static void test_directory_offsets(Client *client) {
     ixp_freefcall(&response);
     response = read_fid(client, 30, (uint64_t)full_count + 1, 100);
     expect_type("directory offset beyond end", &response, P9_RError);
+    ixp_freefcall(&response);
+}
+
+static void test_bounded_reads(Client *client) {
+    const char *large[] = { "large" };
+    const char *directory[] = { "entries" };
+    const char *link[] = { "link" };
+    IxpFcall response;
+    uint32_t iounit;
+    uint32_t index;
+
+    response = walk(client, 1, 31, large, 1);
+    expect_type("walk large file", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = open_fid(client, 31, P9_OREAD);
+    expect_type("open large file", &response, P9_ROpen);
+    iounit = response.ropen.iounit;
+    assert(iounit > 0);
+    ixp_freefcall(&response);
+    response = read_fid(client, 31, 0, UINT32_MAX);
+    expect_type("bounded regular-file read", &response, P9_RRead);
+    assert(response.rread.count == iounit);
+    for(index = 0; index < response.rread.count; index++)
+        assert(response.rread.data[index] == (char)('a' + index % 26));
+    ixp_freefcall(&response);
+
+    response = walk(client, 1, 32, directory, 1);
+    expect_type("walk bounded directory", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = open_fid(client, 32, P9_OREAD);
+    expect_type("open bounded directory", &response, P9_ROpen);
+    iounit = response.ropen.iounit;
+    ixp_freefcall(&response);
+    response = read_fid(client, 32, 0, UINT32_MAX);
+    expect_type("bounded directory read", &response, P9_RRead);
+    assert(response.rread.count > 0);
+    assert(response.rread.count <= iounit);
+    ixp_freefcall(&response);
+
+    response = walk(client, 1, 33, link, 1);
+    expect_type("walk bounded symlink", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = open_fid(client, 33, P9_OREAD);
+    expect_type("open bounded symlink", &response, P9_ROpen);
+    ixp_freefcall(&response);
+    response = read_fid(client, 33, 0, UINT32_MAX);
+    expect_type("bounded symlink read", &response, P9_RRead);
+    assert(response.rread.count == strlen("target/path"));
+    assert(memcmp(response.rread.data, "target/path",
+                  response.rread.count) == 0);
     ixp_freefcall(&response);
 }
 
@@ -652,6 +769,167 @@ static void test_orclose_and_exec(Client *client, const char *root) {
     ixp_freefcall(&response);
 }
 
+static void test_qid_mutations(Client *client) {
+    const char *created[] = { "qid-file" };
+    IxpFcall response;
+    IxpStat stat;
+    IxpQid root_before;
+    IxpQid root_after;
+    IxpQid file_before;
+    IxpQid file_after;
+
+    root_before = stat_qid(client, 1);
+    response = walk(client, 1, 120, NULL, 0);
+    expect_type("clone root for qid create", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = create_fid(client, 120, "qid-file", 0600, P9_ORDWR, NULL);
+    expect_type("create qid file", &response, P9_RCreate);
+    file_before = response.rcreate.qid;
+    ixp_freefcall(&response);
+    root_after = stat_qid(client, 1);
+    assert(root_after.version != root_before.version);
+
+    response = write_fid(client, 120, 0, "qid", 3);
+    expect_type("write qid file", &response, P9_RWrite);
+    ixp_freefcall(&response);
+    file_after = stat_qid(client, 120);
+    assert(file_after.version != file_before.version);
+    response = clunk(client, 120);
+    expect_type("clunk created qid file", &response, P9_RClunk);
+    ixp_freefcall(&response);
+
+    response = walk(client, 1, 121, created, 1);
+    expect_type("walk qid file", &response, P9_RWalk);
+    file_before = response.rwalk.wqid[0];
+    ixp_freefcall(&response);
+    response = open_fid(client, 121, P9_OWRITE | P9_OTRUNC);
+    expect_type("truncate qid file", &response, P9_ROpen);
+    assert(response.ropen.qid.version != file_before.version);
+    file_before = response.ropen.qid;
+    ixp_freefcall(&response);
+
+    stat = unchanged_stat();
+    stat.mode = 0640;
+    response = wstat_fid(client, 121, &stat);
+    expect_type("chmod qid file", &response, P9_RWStat);
+    ixp_freefcall(&response);
+    file_after = stat_qid(client, 121);
+    assert(file_after.version != file_before.version);
+
+    root_before = stat_qid(client, 1);
+    stat = unchanged_stat();
+    stat.name = "qid-renamed";
+    response = wstat_fid(client, 121, &stat);
+    expect_type("rename qid file", &response, P9_RWStat);
+    ixp_freefcall(&response);
+    root_after = stat_qid(client, 1);
+    assert(root_after.version != root_before.version);
+
+    root_before = root_after;
+    response = remove_fid(client, 121);
+    expect_type("remove qid file", &response, P9_RRemove);
+    ixp_freefcall(&response);
+    root_after = stat_qid(client, 1);
+    assert(root_after.version != root_before.version);
+}
+
+static void test_partial_wstat_qid(Client *client, const char *root) {
+    const char *name[] = { "partial-wstat" };
+    IxpFcall response;
+    IxpStat stat;
+    IxpQid before;
+    IxpQid after;
+    char path[1024];
+
+    response = walk(client, 1, 122, name, 1);
+    expect_type("walk partial wstat file", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = open_fid(client, 122, P9_ORDWR);
+    expect_type("open partial wstat file", &response, P9_ROpen);
+    before = response.ropen.qid;
+    ixp_freefcall(&response);
+
+    make_path(path, sizeof(path), root, "partial-wstat");
+    assert(unlink(path) == 0);
+    stat = unchanged_stat();
+    stat.length = 2;
+    stat.mtime = 1000000002;
+    response = wstat_fid(client, 122, &stat);
+    expect_error("partially applied wstat", &response, ENOENT);
+    ixp_freefcall(&response);
+    after = stat_qid(client, 122);
+    assert(after.version != before.version);
+}
+
+static void test_read_only(const char *binary, const char *root) {
+    const char *name[] = { "read-only" };
+    IxpFcall response;
+    IxpStat requested;
+    Client client;
+    pid_t child;
+    struct stat native;
+    char path[1024];
+
+    child = start_server_mode(binary, root, &client, 1);
+    response = walk(&client, 1, 200, name, 1);
+    expect_type("walk read-only file", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = open_fid(&client, 200, P9_OREAD);
+    expect_type("read-only open for read", &response, P9_ROpen);
+    ixp_freefcall(&response);
+    response = read_fid(&client, 200, 0, UINT32_MAX);
+    expect_type("read-only read", &response, P9_RRead);
+    assert(response.rread.count == strlen("unchanged"));
+    assert(memcmp(response.rread.data, "unchanged",
+                  response.rread.count) == 0);
+    ixp_freefcall(&response);
+    response = walk(&client, 1, 201, name, 1);
+    expect_type("walk read-only write fid", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = open_fid(&client, 201, P9_OWRITE);
+    expect_error("read-only write open", &response, EROFS);
+    ixp_freefcall(&response);
+    response = open_fid(&client, 201, P9_OWRITE | P9_OTRUNC);
+    expect_error("read-only truncate open", &response, EROFS);
+    ixp_freefcall(&response);
+    response = open_fid(&client, 201, P9_OREAD | P9_ORCLOSE);
+    expect_error("read-only orclose open", &response, EROFS);
+    ixp_freefcall(&response);
+
+    response = walk(&client, 1, 202, NULL, 0);
+    expect_type("clone read-only root", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = create_fid(&client, 202, "forbidden", 0600,
+                          P9_OWRITE, NULL);
+    expect_error("read-only create", &response, EROFS);
+    ixp_freefcall(&response);
+
+    response = walk(&client, 1, 203, name, 1);
+    expect_type("walk read-only remove fid", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = remove_fid(&client, 203);
+    expect_error("read-only remove", &response, EROFS);
+    ixp_freefcall(&response);
+
+    requested = unchanged_stat();
+    response = wstat_fid(&client, 200, &requested);
+    expect_type("read-only no-op wstat", &response, P9_RWStat);
+    ixp_freefcall(&response);
+    requested = unchanged_stat();
+    requested.mode = 0600;
+    response = wstat_fid(&client, 200, &requested);
+    expect_error("read-only metadata change", &response, EROFS);
+    ixp_freefcall(&response);
+    stop_server(&client, child);
+
+    make_path(path, sizeof(path), root, "read-only");
+    assert(stat(path, &native) == 0);
+    assert(native.st_size == (off_t)strlen("unchanged"));
+    assert((native.st_mode & 0777) == 0644);
+    make_path(path, sizeof(path), root, "forbidden");
+    assert(access(path, F_OK) < 0 && errno == ENOENT);
+}
+
 int main(int argc, char **argv) {
     char template[] = "/tmp/simple9p-protocol-XXXXXX";
     char outside_template[] = "/tmp/simple9p-outside-XXXXXX";
@@ -676,6 +954,8 @@ int main(int argc, char **argv) {
     write_file(path, "abcdefgh");
     make_path(path, sizeof(path), root, "link");
     assert(symlink("target/path", path) == 0);
+    make_path(path, sizeof(path), root, "large");
+    write_pattern_file(path, IXP_MAX_MSG * 2U);
     make_path(path, sizeof(path), root, "entries");
     assert(mkdir(path, 0700) == 0);
     for(index = 0; index < 4; index++) {
@@ -708,6 +988,11 @@ int main(int argc, char **argv) {
     write_file(path, "tree");
     make_path(path, sizeof(path), root, "metadata");
     write_file(path, "metadata");
+    make_path(path, sizeof(path), root, "partial-wstat");
+    write_file(path, "partial-wstat");
+    make_path(path, sizeof(path), root, "read-only");
+    write_file(path, "unchanged");
+    assert(chmod(path, 0644) == 0);
     make_path(path, sizeof(path), outside, "secret");
     write_file(path, "outside");
     make_path(path, sizeof(path), root, "escape");
@@ -719,13 +1004,17 @@ int main(int argc, char **argv) {
     test_rename_and_open_identity(&client, root);
     test_truncate_and_symlink(&client, root);
     test_directory_offsets(&client);
+    test_bounded_reads(&client);
     test_hardlinks_and_versions(&client);
     test_descendant_rename(&client);
     test_wstat_validation(&client, root);
     test_create_validation(&client, root);
     test_containment(&client, outside);
     test_orclose_and_exec(&client, root);
+    test_qid_mutations(&client);
+    test_partial_wstat_qid(&client, root);
     stop_server(&client, child);
+    test_read_only(argv[1], root);
 
     make_path(path, sizeof(path), root, "entries");
     for(index = 0; index < 4; index++) {
@@ -736,6 +1025,7 @@ int main(int argc, char **argv) {
     assert(rmdir(path) == 0);
     make_path(path, sizeof(path), root, "truncate"); unlink(path);
     make_path(path, sizeof(path), root, "link"); unlink(path);
+    make_path(path, sizeof(path), root, "large"); unlink(path);
     make_path(path, sizeof(path), root, "hard-renamed"); unlink(path);
     make_path(path, sizeof(path), root, "hard-b"); unlink(path);
     make_path(path, sizeof(path), root, "executable"); unlink(path);
@@ -746,6 +1036,7 @@ int main(int argc, char **argv) {
     make_path(path, sizeof(path), root, "moved/child"); rmdir(path);
     make_path(path, sizeof(path), root, "moved"); rmdir(path);
     make_path(path, sizeof(path), root, "metadata"); unlink(path);
+    make_path(path, sizeof(path), root, "read-only"); unlink(path);
     make_path(path, sizeof(path), root, "escape"); unlink(path);
     make_path(path, sizeof(path), root, "dir"); assert(rmdir(path) == 0);
     assert(rmdir(root) == 0);

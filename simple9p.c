@@ -79,9 +79,10 @@ static void serve_stream(int fd) {
 }
 
 static void usage(const char *prog) {
-    fprintf(stderr, "Usage: %s [-d] [-h] [-p address] [directory]\n", prog);
+    fprintf(stderr, "Usage: %s [-d] [-h] [-r] [-p address] [directory]\n", prog);
     fprintf(stderr, "  -d          Enable debug output\n");
     fprintf(stderr, "  -h          Show this help\n");
+    fprintf(stderr, "  -r          Serve the filesystem read-only\n");
     fprintf(stderr, "  -p address  Use '-' for a bidirectional stdin stream\n");
     fprintf(stderr, "              Use stream!path for a connected stream device\n");
 #ifndef SIMPLE9P_NO_NETWORK
@@ -95,7 +96,7 @@ int main(int argc, char *argv[]) {
     char *addr = nil;
     int c;
 
-    while((c = getopt(argc, argv, "dhp:")) != -1) {
+    while((c = getopt(argc, argv, "dhrp:")) != -1) {
         switch(c) {
         case 'd':
             debug = 1;
@@ -103,6 +104,9 @@ int main(int argc, char *argv[]) {
         case 'h':
             usage(argv[0]);
             exit(0);
+        case 'r':
+            simple9p.read_only = 1;
+            break;
         case 'p':
             addr = optarg;
             break;

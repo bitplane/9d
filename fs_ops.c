@@ -9,62 +9,21 @@
 
 Simple9pServer simple9p;
 
-typedef struct QidGeneration {
-    uint64_t path;
-    uint32_t value;
-    struct QidGeneration *next;
-} QidGeneration;
-
-uint32_t qid_version(uint64_t path, const struct stat *st) {
-    QidGeneration *generation;
-    uint32_t version = (uint32_t)st->st_mtime;
-
-    for(generation = simple9p.generations; generation;
-        generation = generation->next) {
-        if(generation->path == path)
-            return version ^ generation->value;
-    }
-    return version;
+uint32_t qid_version(const struct stat *st) {
+    return (uint32_t)st->st_mtime + simple9p.qid_generation;
 }
 
-int qid_prepare(uint64_t path) {
-    QidGeneration *generation;
-
-    for(generation = simple9p.generations; generation;
-        generation = generation->next) {
-        if(generation->path == path) {
-            return 0;
-        }
-    }
-    generation = s9_malloc(sizeof(*generation));
-    if(!generation)
-        return -1;
-    generation->path = path;
-    generation->value = 0;
-    generation->next = simple9p.generations;
-    simple9p.generations = generation;
-    return 0;
-}
-
-void qid_bump(uint64_t path) {
-    QidGeneration *generation;
-
-    for(generation = simple9p.generations; generation;
-        generation = generation->next) {
-        if(generation->path == path) {
-            generation->value++;
-            return;
-        }
-    }
+void qid_bump(void) {
+    simple9p.qid_generation++;
 }
 
 void simple9p_state_cleanup(void) {
-    QidGeneration *generation;
+    simple9p.qid_generation = 0;
+}
 
-    while((generation = simple9p.generations) != NULL) {
-        simple9p.generations = generation->next;
-        s9_free(generation);
-    }
+void respond_errno(Ixp9Req *r, int error) {
+    r->ofcall.error.uerrno = (uint32_t)error;
+    ixp_respond(r, strerror(error));
 }
 
 static void set_qid(IxpQid *qid, const ResolvedPath *resolved,
@@ -72,7 +31,7 @@ static void set_qid(IxpQid *qid, const ResolvedPath *resolved,
     if(resolved->synthetic) {
         qid->type = P9_QTDIR;
         qid->path = namespace_root_qid();
-        qid->version = 0;
+        qid->version = simple9p.qid_generation;
         return;
     }
     qid->type = P9_QTFILE;
@@ -81,7 +40,7 @@ static void set_qid(IxpQid *qid, const ResolvedPath *resolved,
     else if(S_ISLNK(st->st_mode))
         qid->type = P9_QTSYMLINK;
     qid->path = namespace_qid(resolved, st);
-    qid->version = qid_version(qid->path, st);
+    qid->version = qid_version(st);
 }
 
 void fid_state_register(FidState *state) {
@@ -163,14 +122,14 @@ void fs_attach(Ixp9Req *r) {
 
     state = fid_state_create("/");
     if(!state) {
-        ixp_respond(r, "out of memory");
+        respond_errno(r, ENOMEM);
         return;
     }
     if(namespace_resolve("/", &resolved) < 0 ||
        (!resolved.synthetic && platform_lstat(&resolved, &st) < 0)) {
         int error = errno;
         fid_state_destroy(state);
-        ixp_respond(r, strerror(error));
+        respond_errno(r, error);
         return;
     }
     if(resolved.synthetic)
@@ -184,16 +143,16 @@ void fs_attach(Ixp9Req *r) {
 void fs_walk(Ixp9Req *r) {
     FidState *state = r->fid->aux;
     char *candidate;
-    unsigned int i;
+    uint16_t i;
     IxpQid final_qid;
 
     if(!state || !state->path) {
-        ixp_respond(r, "invalid fid state for walk");
+        respond_errno(r, EBADF);
         return;
     }
     candidate = s9_strdup(state->path);
     if(!candidate) {
-        ixp_respond(r, "out of memory");
+        respond_errno(r, ENOMEM);
         return;
     }
     final_qid = r->fid->qid;
@@ -209,7 +168,7 @@ void fs_walk(Ixp9Req *r) {
             if(i == 0) {
                 int error = errno;
                 s9_free(candidate);
-                ixp_respond(r, strerror(error));
+                respond_errno(r, error);
                 return;
             }
             break;
@@ -221,7 +180,7 @@ void fs_walk(Ixp9Req *r) {
             if(i == 0) {
                 int error = errno;
                 s9_free(candidate);
-                ixp_respond(r, strerror(error));
+                respond_errno(r, error);
                 return;
             }
             break;
@@ -247,7 +206,7 @@ void fs_walk(Ixp9Req *r) {
             FidState *newstate = fid_state_create(candidate);
             if(!newstate) {
                 s9_free(candidate);
-                ixp_respond(r, "out of memory");
+                respond_errno(r, ENOMEM);
                 return;
             }
             r->newfid->aux = newstate;
@@ -269,14 +228,14 @@ void fs_clunk(Ixp9Req *r) {
 
         if(namespace_resolve(state->path, &resolved) < 0 ||
            platform_lstat(&resolved, &st) < 0) {
-            ixp_respond(r, strerror(errno));
+            respond_errno(r, errno);
             return;
         }
         if(platform_remove(&resolved, S_ISDIR(st.st_mode)) < 0) {
-            ixp_respond(r, strerror(errno));
+            respond_errno(r, errno);
             return;
         }
-        qid_bump(r->fid->qid.path);
+        qid_bump();
     }
     ixp_respond(r, nil);
 }

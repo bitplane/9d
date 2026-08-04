@@ -20,7 +20,8 @@ typedef struct DirCheckpoint {
 
 typedef struct Simple9pServer {
     FidState *fids;
-    struct QidGeneration *generations;
+    uint32_t qid_generation;
+    int read_only;
 } Simple9pServer;
 
 /* Global variables */
@@ -59,10 +60,11 @@ void fid_state_destroy(FidState *state);
 void fid_state_register(FidState *state);
 void fid_state_unregister(FidState *state);
 void fid_state_close(FidState *state);
-uint32_t qid_version(uint64_t path, const struct stat *st);
-int qid_prepare(uint64_t path);
-void qid_bump(uint64_t path);
+uint32_t qid_version(const struct stat *st);
+void qid_bump(void);
 void simple9p_state_cleanup(void);
+void respond_errno(Ixp9Req *r, int error);
+uint32_t fs_read_count(const Ixp9Req *r);
 
 /* Path functions */
 void cleanname(char *name);

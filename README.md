@@ -9,20 +9,23 @@ Uses [libixp](https://github.com/0intro/libixp)
 ## Building
 
 Run `make` to build a server with connected-stream and network transports.
+
 For guests that only use an already-connected stream, such as a serial port,
-build with `make NETWORK=0`. This omits the network transport without changing
-the resulting program name.
+build with `make NETWORK=0`.
 
 ## Usage
 
 ```text
-simple9p [-d] [-p address] [directory]
+simple9p [-d] [-r] [-p address] [directory]
 ```
 
-An explicit directory serves that directory as before. Without one, simple9p
-serves the platform's filesystem namespace: `/` on Unix-like systems, or a
-startup snapshot of mounted volumes beneath a synthetic `/` on Amiga-like
-systems. The namespace remains fixed for the life of the server.
+Use `-r` to reject opens and operations that could modify the exported
+filesystem. Writable service remains the default.
+
+Without a dir, simple9p serves the platform's filesystem namespace: `/` on
+Unix-like systems, or a startup snapshot of mounted volumes beneath a synthetic
+`/` on Amiga-like systems. The namespace remains fixed for the life of the
+server.
 
 With network support enabled, the default address is `tcp!localhost!564`.
 Use `-p -` for a bidirectional standard-input stream or `-p stream!path` for
@@ -30,16 +33,9 @@ an already-connected device such as a serial port.
 
 ## Status
 
-This will eventually evolve into the default `qemount`'s back-end, unless I
-find something better.
-
-Fids retain their opened file, directory or symlink until clunk, so later path
-renames and removals do not silently redirect I/O. POSIX exports anchor path
-resolution at the original root directory and reject symlinks in intermediate
-components. The direct protocol tests cover walk, mutation, metadata, directory
-offset, symlink, containment and allocation-failure behaviour, but the server
-is still young enough that important data should be served read-only or backed
-up.
+This is slowly evolving into something that actually works. It's becoming more
+robust, but it's still not tested enough to be deemed trustworthy - use at your
+own risk.
 
 ## License
 
@@ -47,4 +43,4 @@ WTFPL with one additional clause:
 
 * Don't blame me.
 
-Do whatever the fuck you want with it, but if it goes wrong it's on you.
+Do wtf you like, but you get what you pay for.

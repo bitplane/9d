@@ -3,7 +3,12 @@ CPPFLAGS += -D_XOPEN_SOURCE=700 -Ilibixp/include
 CFLAGS += -g -O0
 LDFLAGS += -static
 LIBS = build/libixp.a -lpthread
-LIBIXP_CFLAGS = $(filter-out -Werror,$(CFLAGS))
+LIBIXP_CFLAGS = $(filter-out -Wall -Wextra -Wpedantic -Wconversion \
+	-Wshadow -Wformat=2 -Werror,$(CFLAGS))
+WARNING_CFLAGS = -g -O2 -Wall -Wextra -Wpedantic -Wconversion -Wshadow \
+	-Wformat=2 -Werror
+SANITIZER_FLAGS = -g -O1 -fno-omit-frame-pointer \
+	-fsanitize=address,undefined
 
 NETWORK ?= 1
 ifeq ($(NETWORK),0)
@@ -67,6 +72,19 @@ test-protocol: build/protocol_test build/simple9p
 test-allocations: build/allocation_test
 	./build/allocation_test
 
+check-warnings:
+	$(MAKE) clean
+	$(MAKE) CFLAGS="$(WARNING_CFLAGS)" LIBIXP_CFLAGS="-g -O2 -w" LDFLAGS= \
+		test-namespace test-allocations test-protocol build/simple9p-synthetic
+
+check-sanitizers:
+	$(MAKE) clean
+	ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 \
+		$(MAKE) CFLAGS="$(SANITIZER_FLAGS)" \
+		LIBIXP_CFLAGS="$(SANITIZER_FLAGS) -w" \
+		LDFLAGS="-fsanitize=address,undefined" \
+		test-namespace test-allocations test-protocol build/simple9p-synthetic
+
 build/namespace_test: test/namespace_test.c namespace.c namespace.h path.c alloc.c server.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test/namespace_test.c namespace.c path.c alloc.c
 
@@ -79,11 +97,17 @@ build/allocation_test: test/allocation_test.c alloc.c path.c namespace.c \
 		test/allocation_test.c alloc.c path.c namespace.c platform_posix.c \
 		fs_ops.c fs_stat.c $(LIBS)
 
+build/platform_posix-synthetic.o: platform_posix.c platform.h namespace.h | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) \
+		-Dplatform_namespace_init=platform_namespace_init_native \
+		-c platform_posix.c -o $@
+
 build/simple9p-synthetic: simple9p.c alloc.c path.c namespace.c test/platform_synthetic.c \
 						 fs_ops.c fs_io.c fs_stat.c fs_dir.c server.h namespace.h \
-						 libixp | build
+						 build/platform_posix-synthetic.o libixp | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ simple9p.c alloc.c path.c namespace.c \
-		test/platform_synthetic.c fs_ops.c fs_io.c fs_stat.c fs_dir.c $(LIBS)
+		test/platform_synthetic.c fs_ops.c fs_io.c fs_stat.c fs_dir.c \
+		build/platform_posix-synthetic.o $(LIBS)
 
 .PHONY: all clean libixp test test-build-options test-namespace test-protocol \
-	test-allocations
+	test-allocations check-warnings check-sanitizers

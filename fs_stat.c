@@ -57,7 +57,7 @@ int build_stat(IxpStat *s, const char *path, const ResolvedPath *resolved,
     s->qid.type = S_ISDIR(st->st_mode) ? P9_QTDIR :
                   S_ISLNK(st->st_mode) ? P9_QTSYMLINK : P9_QTFILE;
     s->qid.path = namespace_qid(resolved, st);
-    s->qid.version = qid_version(s->qid.path, st);
+    s->qid.version = qid_version(st);
     s->mode = st->st_mode & 0777;
     if(S_ISDIR(st->st_mode))
         s->mode |= P9_DMDIR;
@@ -95,6 +95,7 @@ int build_synthetic_stat(IxpStat *s, const char *name) {
     memset(s, 0, sizeof(*s));
     s->qid.type = P9_QTDIR;
     s->qid.path = namespace_root_qid();
+    s->qid.version = simple9p.qid_generation;
     s->mode = P9_DMDIR | 0555;
     s->name = s9_strdup(name);
     s->uid = s9_strdup("none");
@@ -150,21 +151,21 @@ void fs_stat(Ixp9Req *r) {
     uint16_t size;
 
     if(!state || !state->path) {
-        ixp_respond(r, "invalid fid state");
+        respond_errno(r, EBADF);
         return;
     }
     if(state_stat(state, &resolved, &st) < 0) {
-        ixp_respond(r, strerror(errno));
+        respond_errno(r, errno);
         return;
     }
     if(resolved.synthetic) {
         if(build_synthetic_stat(&stat, "/") < 0) {
-            ixp_respond(r, "out of memory");
+            respond_errno(r, ENOMEM);
             return;
         }
     } else if(build_stat(&stat, state->path, &resolved, &st,
                          state->symlink) < 0) {
-        ixp_respond(r, "out of memory");
+        respond_errno(r, ENOMEM);
         return;
     }
     size = ixp_sizeof_stat(&stat, ixp_req_getversion(r));
@@ -172,7 +173,7 @@ void fs_stat(Ixp9Req *r) {
     r->ofcall.rstat.stat = s9_malloc(size);
     if(!r->ofcall.rstat.stat) {
         free_stat_strings(&stat);
-        ixp_respond(r, "out of memory");
+        respond_errno(r, ENOMEM);
         return;
     }
     message = ixp_message((char *)r->ofcall.rstat.stat, size, MsgPack);
@@ -280,55 +281,64 @@ void fs_wstat(Ixp9Req *r) {
     int change_mode = requested->mode != UINT32_MAX;
     int change_atime = requested->atime != UINT32_MAX;
     int change_mtime = requested->mtime != UINT32_MAX;
+    int change_ownership;
+    int mutated = 0;
 
     if(!state || !state->path) {
-        ixp_respond(r, "invalid fid state");
+        respond_errno(r, EBADF);
         return;
     }
     change_name = requested->name && requested->name[0] &&
                   strcmp(requested->name, path_basename(state->path)) != 0;
-    if(namespace_is_protected(state->path)) {
-        ixp_respond(r, strerror(EPERM));
+    change_ownership = (requested->uid && requested->uid[0]) ||
+                       (requested->gid && requested->gid[0]) ||
+                       (requested->muid && requested->muid[0]) ||
+                       (ixp_req_getversion(r) == IXP_V9P2000U &&
+                        ownership_requested(requested));
+    if(simple9p.read_only &&
+       (change_name || change_length || change_mode || change_atime ||
+        change_mtime || change_ownership)) {
+        respond_errno(r, EROFS);
         return;
     }
-    if((requested->uid && requested->uid[0]) ||
-       (requested->gid && requested->gid[0]) ||
-       (requested->muid && requested->muid[0]) ||
-       (ixp_req_getversion(r) == IXP_V9P2000U &&
-        ownership_requested(requested))) {
-        ixp_respond(r, strerror(EOPNOTSUPP));
+    if(namespace_is_protected(state->path)) {
+        respond_errno(r, EPERM);
+        return;
+    }
+    if(change_ownership) {
+        respond_errno(r, EOPNOTSUPP);
         return;
     }
     if(change_name && (change_length || change_mode || change_atime ||
                        change_mtime)) {
-        ixp_respond(r, strerror(EINVAL));
+        respond_errno(r, EINVAL);
         return;
     }
     if(change_name && !namespace_valid_component(requested->name)) {
-        ixp_respond(r, strerror(EINVAL));
+        respond_errno(r, EINVAL);
         return;
     }
     if(namespace_resolve(state->path, &resolved) < 0 ||
        state_stat(state, &resolved, &original) < 0) {
-        ixp_respond(r, strerror(errno));
+        respond_errno(r, errno);
         return;
     }
     if(change_mode) {
         uint32_t allowed_type = S_ISDIR(original.st_mode) ? P9_DMDIR :
                                 S_ISLNK(original.st_mode) ? P9_DMSYMLINK : 0;
         if((requested->mode & ~0777U) != allowed_type) {
-            ixp_respond(r, strerror(EOPNOTSUPP));
+            respond_errno(r, EOPNOTSUPP);
             return;
         }
     }
     if(change_length) {
         off_t length = (off_t)requested->length;
         if(S_ISDIR(original.st_mode)) {
-            ixp_respond(r, strerror(EISDIR));
+            respond_errno(r, EISDIR);
             return;
         }
         if(length < 0 || (uint64_t)length != requested->length) {
-            ixp_respond(r, strerror(EFBIG));
+            respond_errno(r, EFBIG);
             return;
         }
     }
@@ -343,7 +353,7 @@ void fs_wstat(Ixp9Req *r) {
         RenameUpdate *updates;
 
         if(!parent) {
-            ixp_respond(r, "out of memory");
+            respond_errno(r, ENOMEM);
             return;
         }
         memcpy(parent, state->path, parent_length);
@@ -353,38 +363,26 @@ void fs_wstat(Ixp9Req *r) {
         if(!new_path || namespace_resolve(new_path, &renamed) < 0) {
             int error = errno;
             s9_free(new_path);
-            ixp_respond(r, strerror(error));
+            respond_errno(r, error);
             return;
         }
         updates = prepare_updates(state->path, new_path);
         if(!updates) {
             s9_free(new_path);
-            ixp_respond(r, "out of memory");
-            return;
-        }
-        if(qid_prepare(r->fid->qid.path) < 0) {
-            free_updates(updates);
-            s9_free(new_path);
-            ixp_respond(r, "out of memory");
+            respond_errno(r, ENOMEM);
             return;
         }
         if(platform_rename(&resolved, &renamed) < 0) {
             int error = errno;
             free_updates(updates);
             s9_free(new_path);
-            ixp_respond(r, strerror(error));
+            respond_errno(r, error);
             return;
         }
         commit_updates(updates);
         s9_free(new_path);
-        qid_bump(r->fid->qid.path);
+        qid_bump();
         ixp_respond(r, nil);
-        return;
-    }
-
-    if((change_mode || change_atime || change_mtime || change_length) &&
-       qid_prepare(r->fid->qid.path) < 0) {
-        ixp_respond(r, "out of memory");
         return;
     }
 
@@ -394,9 +392,10 @@ void fs_wstat(Ixp9Req *r) {
                                     : platform_chmod(&resolved,
                                                      requested->mode & 0777);
         if(result < 0) {
-            ixp_respond(r, strerror(errno));
+            respond_errno(r, errno);
             return;
         }
+        mutated = 1;
     }
     if(change_length) {
         off_t length = (off_t)requested->length;
@@ -406,9 +405,12 @@ void fs_wstat(Ixp9Req *r) {
             int error = errno;
             if(change_mode)
                 platform_chmod(&resolved, original.st_mode & 0777);
-            ixp_respond(r, strerror(error));
+            if(mutated)
+                qid_bump();
+            respond_errno(r, error);
             return;
         }
+        mutated = 1;
     }
     if(change_atime || change_mtime) {
         time_t atime = change_atime ? requested->atime : original.st_atime;
@@ -417,12 +419,15 @@ void fs_wstat(Ixp9Req *r) {
             int error = errno;
             if(change_mode)
                 platform_chmod(&resolved, original.st_mode & 0777);
-            ixp_respond(r, strerror(error));
+            if(mutated)
+                qid_bump();
+            respond_errno(r, error);
             return;
         }
+        mutated = 1;
     }
-    if(change_mode || change_atime || change_mtime || change_length)
-        qid_bump(r->fid->qid.path);
+    if(mutated)
+        qid_bump();
     if(state->stat_valid && platform_lstat(&resolved, &state->opened_stat) < 0)
         state->stat_valid = 0;
     ixp_respond(r, nil);

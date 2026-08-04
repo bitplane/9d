@@ -57,17 +57,18 @@ static int seek_directory(FidState *state, uint64_t offset) {
 void read_directory(Ixp9Req *r, FidState *state) {
     IxpMsg message;
     char *buffer;
+    uint32_t count = fs_read_count(r);
 
     if(seek_directory(state, r->ifcall.tread.offset) < 0) {
-        ixp_respond(r, strerror(errno));
+        respond_errno(r, errno);
         return;
     }
-    buffer = s9_malloc(r->ifcall.tread.count ? r->ifcall.tread.count : 1);
+    buffer = s9_malloc(count ? count : 1);
     if(!buffer) {
-        ixp_respond(r, "out of memory");
+        respond_errno(r, ENOMEM);
         return;
     }
-    message = ixp_message(buffer, r->ifcall.tread.count, MsgPack);
+    message = ixp_message(buffer, count, MsgPack);
     message.version = ixp_req_getversion(r);
 
     for(;;) {
@@ -99,7 +100,7 @@ void read_directory(Ixp9Req *r, FidState *state) {
             s9_free(virtual_path);
             seekdir(state->dir, before);
             s9_free(buffer);
-            ixp_respond(r, strerror(errno));
+            respond_errno(r, errno);
             return;
         }
         s9_free(virtual_path);
@@ -114,7 +115,7 @@ void read_directory(Ixp9Req *r, FidState *state) {
             free_stat_strings(&stat);
             seekdir(state->dir, before);
             s9_free(buffer);
-            ixp_respond(r, strerror(errno));
+            respond_errno(r, errno);
             return;
         }
         ixp_pstat(&message, &stat);
@@ -132,14 +133,15 @@ void read_synthetic_directory(Ixp9Req *r, FidState *state) {
     uint64_t position = 0;
     size_t index;
     int boundary = r->ifcall.tread.offset == 0;
+    uint32_t count = fs_read_count(r);
 
     (void)state;
-    buffer = s9_malloc(r->ifcall.tread.count ? r->ifcall.tread.count : 1);
+    buffer = s9_malloc(count ? count : 1);
     if(!buffer) {
-        ixp_respond(r, "out of memory");
+        respond_errno(r, ENOMEM);
         return;
     }
-    message = ixp_message(buffer, r->ifcall.tread.count, MsgPack);
+    message = ixp_message(buffer, count, MsgPack);
     message.version = ixp_req_getversion(r);
 
     for(index = 0; index < namespace.nroots; index++) {
@@ -162,7 +164,7 @@ void read_synthetic_directory(Ixp9Req *r, FidState *state) {
         if(build_stat(&stat, virtual_path, &resolved, &st, NULL) < 0) {
             s9_free(virtual_path);
             s9_free(buffer);
-            ixp_respond(r, "out of memory");
+            respond_errno(r, ENOMEM);
             return;
         }
         s9_free(virtual_path);
@@ -177,7 +179,7 @@ void read_synthetic_directory(Ixp9Req *r, FidState *state) {
         if(!boundary) {
             free_stat_strings(&stat);
             s9_free(buffer);
-            ixp_respond(r, strerror(EINVAL));
+            respond_errno(r, EINVAL);
             return;
         }
         if((size_t)(message.end - message.pos) < length) {
@@ -190,7 +192,7 @@ void read_synthetic_directory(Ixp9Req *r, FidState *state) {
     }
     if(r->ifcall.tread.offset > position) {
         s9_free(buffer);
-        ixp_respond(r, strerror(EINVAL));
+        respond_errno(r, EINVAL);
         return;
     }
     r->ofcall.rread.count = (uint32_t)(message.pos - buffer);
@@ -201,18 +203,19 @@ void read_synthetic_directory(Ixp9Req *r, FidState *state) {
 void read_symlink(Ixp9Req *r, FidState *state) {
     uint64_t offset = r->ifcall.tread.offset;
     size_t count;
+    uint32_t limit = fs_read_count(r);
     char *buffer;
 
     if(offset >= state->symlink_length)
         count = 0;
     else {
         count = state->symlink_length - (size_t)offset;
-        if(count > r->ifcall.tread.count)
-            count = r->ifcall.tread.count;
+        if(count > limit)
+            count = limit;
     }
     buffer = s9_malloc(count ? count : 1);
     if(!buffer) {
-        ixp_respond(r, "out of memory");
+        respond_errno(r, ENOMEM);
         return;
     }
     if(count)
@@ -226,29 +229,30 @@ void read_file(Ixp9Req *r, FidState *state) {
     off_t offset = (off_t)r->ifcall.tread.offset;
     char *buffer;
     ssize_t count;
+    uint32_t limit = fs_read_count(r);
 
     if(offset < 0 || (uint64_t)offset != r->ifcall.tread.offset) {
-        ixp_respond(r, strerror(EOVERFLOW));
+        respond_errno(r, EOVERFLOW);
         return;
     }
-    buffer = s9_malloc(r->ifcall.tread.count ? r->ifcall.tread.count : 1);
+    buffer = s9_malloc(limit ? limit : 1);
     if(!buffer) {
-        ixp_respond(r, "out of memory");
+        respond_errno(r, ENOMEM);
         return;
     }
-    if(r->ifcall.tread.count == 0)
+    if(limit == 0)
         count = 0;
     else if(lseek(state->fd, offset, SEEK_SET) < 0) {
         int error = errno;
         s9_free(buffer);
-        ixp_respond(r, strerror(error));
+        respond_errno(r, error);
         return;
     } else
-        count = read(state->fd, buffer, r->ifcall.tread.count);
+        count = read(state->fd, buffer, limit);
     if(count < 0) {
         int error = errno;
         s9_free(buffer);
-        ixp_respond(r, strerror(error));
+        respond_errno(r, error);
         return;
     }
     r->ofcall.rread.count = (uint32_t)count;

@@ -94,22 +94,18 @@ static void test_rename_allocations(void) {
     assert(simple9p.fids == NULL);
 }
 
-static void test_qid_allocation(void) {
+static void test_qid_generation(void) {
     struct stat native;
     uint32_t before;
 
     memset(&native, 0, sizeof(native));
     native.st_mtime = 123;
-    s9_fail_allocation_after(0);
-    assert(qid_prepare(456) == -1);
-    assert(simple9p.generations == NULL);
-    s9_fail_allocation_after(1);
-    assert(qid_prepare(456) == 0);
-    before = qid_version(456, &native);
-    qid_bump(456);
-    assert(qid_version(456, &native) != before);
+    before = qid_version(&native);
+    qid_bump();
+    assert(qid_version(&native) != before);
     simple9p_state_cleanup();
-    assert(simple9p.generations == NULL);
+    assert(simple9p.qid_generation == 0);
+    assert(qid_version(&native) == before);
 }
 
 int main(void) {
@@ -127,7 +123,7 @@ int main(void) {
     test_path_allocation();
     test_stat_allocations(root);
     test_rename_allocations();
-    test_qid_allocation();
+    test_qid_generation();
     s9_fail_allocation_after(-1);
     assert(unlink(path) == 0);
     assert(rmdir(root) == 0);
