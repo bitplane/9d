@@ -1,0 +1,39 @@
+name: Release source archive
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch pinned dependencies
+        run: make deps
+      - name: Test
+        run: |
+          make check-warnings
+          make check-sanitizers
+      - name: Build complete source archive
+        run: make dist VERSION="${GITHUB_REF_NAME#v}"
+      - name: Verify offline source archive
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          work=$(mktemp -d)
+          tar -C "$work" -xf "dist/simple9p-$version.tar.xz"
+          test ! -e "$work/simple9p-$version/libixp/.git"
+          make -C "$work/simple9p-$version" release
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber

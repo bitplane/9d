@@ -8,33 +8,68 @@
 #include <unistd.h>
 
 static DirCheckpoint *find_checkpoint(FidState *state, uint64_t offset) {
-    DirCheckpoint *checkpoint;
+    size_t index;
 
-    for(checkpoint = state->checkpoints; checkpoint;
-        checkpoint = checkpoint->next) {
-        if(checkpoint->offset == offset)
-            return checkpoint;
-    }
+    for(index = 0; index < state->checkpoint_count; index++)
+        if(state->checkpoints[index].offset == offset)
+            return &state->checkpoints[index];
     return NULL;
 }
 
-static int remember_checkpoint(FidState *state, uint64_t offset,
-                               long cookie) {
+static void remember_checkpoint(FidState *state, uint64_t offset,
+                                long cookie) {
     DirCheckpoint *checkpoint;
 
-    if(find_checkpoint(state, offset))
-        return 0;
-    checkpoint = s9_malloc(sizeof(*checkpoint));
-    if(!checkpoint)
-        return -1;
+    checkpoint = find_checkpoint(state, offset);
+    if(!checkpoint) {
+        checkpoint = &state->checkpoints[state->checkpoint_next];
+        state->checkpoint_next = (state->checkpoint_next + 1) %
+                                 S9_DIR_CHECKPOINTS;
+        if(state->checkpoint_count < S9_DIR_CHECKPOINTS)
+            state->checkpoint_count++;
+    }
     checkpoint->offset = offset;
     checkpoint->cookie = cookie;
-    checkpoint->next = state->checkpoints;
-    state->checkpoints = checkpoint;
-    return 0;
 }
 
-static int seek_directory(FidState *state, uint64_t offset) {
+static int next_directory_stat(FidState *state, IxpStat *stat,
+                               long *before, long *after) {
+    for(;;) {
+        struct dirent *entry;
+        char *virtual_path;
+        ResolvedPath resolved;
+        struct stat native;
+
+        *before = telldir(state->dir);
+        errno = 0;
+        entry = readdir(state->dir);
+        if(!entry)
+            return errno ? -1 : 0;
+        if(strcmp(entry->d_name, ".") == 0 ||
+           strcmp(entry->d_name, "..") == 0)
+            continue;
+        virtual_path = namespace_join_virtual_alloc(state->path,
+                                                    entry->d_name);
+        if(!virtual_path)
+            return -1;
+        if(namespace_resolve(virtual_path, &resolved) < 0 ||
+           platform_lstat_child(state->dir, &resolved, entry->d_name,
+                                &native) < 0) {
+            s9_free(virtual_path);
+            continue;
+        }
+        memset(stat, 0, sizeof(*stat));
+        if(build_stat(stat, virtual_path, &resolved, &native, NULL) < 0) {
+            s9_free(virtual_path);
+            return -1;
+        }
+        s9_free(virtual_path);
+        *after = telldir(state->dir);
+        return 1;
+    }
+}
+
+static int seek_directory(FidState *state, uint64_t offset, uint version) {
     DirCheckpoint *checkpoint;
 
     if(offset == state->dir_offset)
@@ -45,12 +80,42 @@ static int seek_directory(FidState *state, uint64_t offset) {
         return 0;
     }
     checkpoint = find_checkpoint(state, offset);
-    if(!checkpoint) {
-        errno = EINVAL;
-        return -1;
+    if(checkpoint) {
+        seekdir(state->dir, checkpoint->cookie);
+        state->dir_offset = offset;
+        return 0;
     }
-    seekdir(state->dir, checkpoint->cookie);
-    state->dir_offset = offset;
+
+    rewinddir(state->dir);
+    state->dir_offset = 0;
+    while(state->dir_offset < offset) {
+        IxpStat stat;
+        uint16_t length;
+        long before;
+        long after;
+        int result = next_directory_stat(state, &stat, &before, &after);
+
+        (void)before;
+        if(result <= 0) {
+            int error = result == 0 ? EINVAL : errno;
+
+            rewinddir(state->dir);
+            state->dir_offset = 0;
+            errno = error;
+            return -1;
+        }
+        length = ixp_sizeof_stat(&stat, version);
+        free_stat_strings(&stat);
+        if(state->dir_offset > UINT64_MAX - length ||
+           state->dir_offset + length > offset) {
+            rewinddir(state->dir);
+            state->dir_offset = 0;
+            errno = EINVAL;
+            return -1;
+        }
+        state->dir_offset += length;
+        remember_checkpoint(state, state->dir_offset, after);
+    }
     return 0;
 }
 
@@ -59,7 +124,8 @@ void read_directory(Ixp9Req *r, FidState *state) {
     char *buffer;
     uint32_t count = fs_read_count(r);
 
-    if(seek_directory(state, r->ifcall.tread.offset) < 0) {
+    if(seek_directory(state, r->ifcall.tread.offset,
+                      ixp_req_getversion(r)) < 0) {
         respond_errno(r, errno);
         return;
     }
@@ -72,52 +138,29 @@ void read_directory(Ixp9Req *r, FidState *state) {
     message.version = ixp_req_getversion(r);
 
     for(;;) {
-        long before = telldir(state->dir);
-        struct dirent *entry = readdir(state->dir);
-        char *virtual_path;
-        ResolvedPath resolved;
-        struct stat st;
         IxpStat stat;
         uint16_t length;
+        long before;
         long after;
+        int result = next_directory_stat(state, &stat, &before, &after);
 
-        if(!entry)
+        if(result == 0)
             break;
-        if(strcmp(entry->d_name, ".") == 0 ||
-           strcmp(entry->d_name, "..") == 0)
-            continue;
-        virtual_path = namespace_join_virtual_alloc(state->path,
-                                                    entry->d_name);
-        if(!virtual_path)
-            continue;
-        if(namespace_resolve(virtual_path, &resolved) < 0 ||
-           platform_lstat(&resolved, &st) < 0) {
-            s9_free(virtual_path);
-            continue;
-        }
-        memset(&stat, 0, sizeof(stat));
-        if(build_stat(&stat, virtual_path, &resolved, &st, NULL) < 0) {
-            s9_free(virtual_path);
+        if(result < 0) {
+            int error = errno;
+
             seekdir(state->dir, before);
             s9_free(buffer);
-            respond_errno(r, errno);
+            respond_errno(r, error);
             return;
         }
-        s9_free(virtual_path);
         length = ixp_sizeof_stat(&stat, ixp_req_getversion(r));
         if((size_t)(message.end - message.pos) < length) {
             free_stat_strings(&stat);
             seekdir(state->dir, before);
             break;
         }
-        after = telldir(state->dir);
-        if(remember_checkpoint(state, state->dir_offset + length, after) < 0) {
-            free_stat_strings(&stat);
-            seekdir(state->dir, before);
-            s9_free(buffer);
-            respond_errno(r, errno);
-            return;
-        }
+        remember_checkpoint(state, state->dir_offset + length, after);
         ixp_pstat(&message, &stat);
         state->dir_offset += length;
         free_stat_strings(&stat);

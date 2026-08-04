@@ -81,7 +81,7 @@ int namespace_use_synthetic(Namespace *ns) {
 
 int namespace_add_root(Namespace *ns, const char *name, const char *path) {
     NamespaceRoot *roots;
-    char encoded[PATH_MAX];
+    char encoded[S9_PATH_MAX];
     char *name_copy;
     char *path_copy;
     size_t i;
@@ -158,7 +158,7 @@ static int find_root(const char *path, size_t length, size_t *index) {
 }
 
 int namespace_resolve(const char *path, ResolvedPath *resolved) {
-    char cleaned[PATH_MAX];
+    char cleaned[S9_PATH_MAX];
     const char *name;
     const char *remainder;
     size_t length;
@@ -229,23 +229,6 @@ int namespace_resolve(const char *path, ResolvedPath *resolved) {
     return 0;
 }
 
-int namespace_join_virtual(char *dst, size_t dstsize, const char *dir,
-                           const char *name) {
-    if(!dst || !dir || !namespace_valid_component(name)) {
-        errno = EINVAL;
-        return -1;
-    }
-    if(strcmp(dir, "/") == 0) {
-        if(snprintf(dst, dstsize, "/%s", name) >= (int)dstsize)
-            return -1;
-    } else {
-        if(snprintf(dst, dstsize, "%s/%s", dir, name) >= (int)dstsize)
-            return -1;
-    }
-    cleanname(dst);
-    return 0;
-}
-
 int namespace_valid_component(const char *name) {
     return name && name[0] && !strchr(name, '/') &&
            strcmp(name, ".") != 0 && strcmp(name, "..") != 0;
@@ -281,11 +264,23 @@ char *namespace_join_virtual_alloc(const char *dir, const char *name) {
 }
 
 int namespace_is_protected(const char *path) {
-    ResolvedPath resolved;
+    const char *name;
+    size_t index;
 
-    if(namespace_resolve(path, &resolved) < 0)
+    if(!namespace.synthetic || !path)
         return 0;
-    return resolved.synthetic || (namespace.synthetic && resolved.export_root);
+    if(strcmp(path, "/") == 0)
+        return 1;
+    name = path;
+    while(*name == '/')
+        name++;
+    if(!name[0] || strchr(name, '/'))
+        return 0;
+    return find_root(name, strlen(name), &index) == 0;
+}
+
+int namespace_is_namespace_root(const char *path) {
+    return namespace.synthetic && path && strcmp(path, "/") == 0;
 }
 
 uint64_t namespace_root_qid(void) {

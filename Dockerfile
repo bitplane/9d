@@ -4,7 +4,6 @@ ARG ARCH
 
 # Install build dependencies
 RUN apk add --no-cache \
-    git \
     make \
     gcc \
     musl-dev \
@@ -13,11 +12,10 @@ RUN apk add --no-cache \
 WORKDIR /build
 
 # Copy our source files
-COPY *.c *.h Makefile ./
+COPY *.c *.h Makefile deps.mk ./
+COPY libixp ./libixp
 
-# Clone the tested libixp integration release
-RUN git clone --depth 1 --branch simple9p-0.3 https://github.com/bitplane/libixp.git && \
-    make
+RUN make release
 
 # serve
 ENTRYPOINT ["/build/build/simple9p"]

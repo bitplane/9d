@@ -23,33 +23,6 @@ static char *number_string(uint32_t value) {
     return s9_strdup(buffer);
 }
 
-static char *read_link_for_stat(const ResolvedPath *path, size_t hint) {
-    size_t size = hint ? hint + 1 : 128;
-
-    for(;;) {
-        char *target = s9_malloc(size);
-        ssize_t length;
-
-        if(!target)
-            return NULL;
-        length = platform_readlink(path, target, size - 1);
-        if(length < 0) {
-            int error = errno;
-            s9_free(target);
-            errno = error;
-            return NULL;
-        }
-        if((size_t)length < size - 1) {
-            target[length] = '\0';
-            return target;
-        }
-        s9_free(target);
-        if(size > SIZE_MAX / 2)
-            return NULL;
-        size *= 2;
-    }
-}
-
 int build_stat(IxpStat *s, const char *path, const ResolvedPath *resolved,
                const struct stat *st,
                const char *symlink_target) {
@@ -75,8 +48,9 @@ int build_stat(IxpStat *s, const char *path, const ResolvedPath *resolved,
     s->muid = s9_strdup("");
     if(S_ISLNK(st->st_mode)) {
         s->extension = symlink_target ? s9_strdup(symlink_target)
-                                      : read_link_for_stat(resolved,
-                                                           (size_t)st->st_size);
+                                      : read_symlink_target(resolved,
+                                                            (size_t)st->st_size,
+                                                            NULL);
         if(s->extension)
             s->length = strlen(s->extension);
     } else
@@ -122,10 +96,8 @@ void free_stat_strings(IxpStat *s) {
     s9_free(s->extension);
 }
 
-static int state_stat(FidState *state, ResolvedPath *resolved,
+static int state_stat(FidState *state, const ResolvedPath *resolved,
                       struct stat *st) {
-    if(namespace_resolve(state->path, resolved) < 0)
-        return -1;
     if(resolved->synthetic) {
         memset(st, 0, sizeof(*st));
         st->st_mode = S_IFDIR | 0555;
@@ -154,7 +126,8 @@ void fs_stat(Ixp9Req *r) {
         respond_errno(r, EBADF);
         return;
     }
-    if(state_stat(state, &resolved, &st) < 0) {
+    if(namespace_resolve(state->path, &resolved) < 0 ||
+       state_stat(state, &resolved, &st) < 0) {
         respond_errno(r, errno);
         return;
     }
@@ -282,6 +255,7 @@ void fs_wstat(Ixp9Req *r) {
     int change_atime = requested->atime != UINT32_MAX;
     int change_mtime = requested->mtime != UINT32_MAX;
     int change_ownership;
+    int has_changes;
     int mutated = 0;
 
     if(!state || !state->path) {
@@ -295,10 +269,19 @@ void fs_wstat(Ixp9Req *r) {
                        (requested->muid && requested->muid[0]) ||
                        (ixp_req_getversion(r) == IXP_V9P2000U &&
                         ownership_requested(requested));
-    if(simple9p.read_only &&
-       (change_name || change_length || change_mode || change_atime ||
-        change_mtime || change_ownership)) {
+    has_changes = change_name || change_length || change_mode ||
+                  change_atime || change_mtime || change_ownership;
+    if(simple9p.read_only && has_changes) {
         respond_errno(r, EROFS);
+        return;
+    }
+    if(namespace_resolve(state->path, &resolved) < 0 ||
+       state_stat(state, &resolved, &original) < 0) {
+        respond_errno(r, errno);
+        return;
+    }
+    if(!has_changes) {
+        ixp_respond(r, nil);
         return;
     }
     if(namespace_is_protected(state->path)) {
@@ -316,11 +299,6 @@ void fs_wstat(Ixp9Req *r) {
     }
     if(change_name && !namespace_valid_component(requested->name)) {
         respond_errno(r, EINVAL);
-        return;
-    }
-    if(namespace_resolve(state->path, &resolved) < 0 ||
-       state_stat(state, &resolved, &original) < 0) {
-        respond_errno(r, errno);
         return;
     }
     if(change_mode) {

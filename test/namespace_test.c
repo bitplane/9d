@@ -24,14 +24,9 @@ void platform_namespace_cleanup(Namespace *ns) {
 
 static void test_native_namespace(const char *root) {
     ResolvedPath resolved;
-    char parent[PATH_MAX];
 
     assert(strcmp(path_basename("/volume/file"), "file") == 0);
     assert(strcmp(path_basename("/volume"), "volume") == 0);
-    assert(path_parent("/volume/file", parent, sizeof(parent)) == 0);
-    assert(strcmp(parent, "/volume") == 0);
-    assert(path_parent("/volume", parent, sizeof(parent)) == 0);
-    assert(strcmp(parent, "/") == 0);
     assert(namespace_init(root) == 0);
     assert(namespace.synthetic == 0);
     assert(namespace_resolve("/child", &resolved) == 0);
@@ -47,7 +42,7 @@ static void test_synthetic_namespace(const char *first, const char *second) {
     ResolvedPath other;
     struct stat first_stat;
     struct stat second_stat;
-    char path[PATH_MAX];
+    char *path;
 
     memset(&namespace, 0, sizeof(namespace));
     assert(namespace_use_synthetic(&namespace) == 0);
@@ -72,10 +67,14 @@ static void test_synthetic_namespace(const char *first, const char *second) {
     assert(namespace_is_protected("/Work") == 1);
     assert(namespace_is_protected("/Work/file") == 0);
 
-    assert(namespace_join_virtual(path, sizeof(path), "/Work", "..") == -1);
-    assert(namespace_join_virtual(path, sizeof(path), "/Work", ".") == -1);
-    assert(namespace_join_virtual(path, sizeof(path), "/Work", "") == -1);
-    assert(namespace_join_virtual(path, sizeof(path), "/Work", "a/b") == -1);
+    assert(namespace_join_virtual_alloc("/Work", "..") == NULL);
+    assert(namespace_join_virtual_alloc("/Work", ".") == NULL);
+    assert(namespace_join_virtual_alloc("/Work", "") == NULL);
+    assert(namespace_join_virtual_alloc("/Work", "a/b") == NULL);
+    path = namespace_join_virtual_alloc("/Work", "file");
+    assert(path != NULL);
+    assert(strcmp(path, "/Work/file") == 0);
+    s9_free(path);
 
     assert(stat(first, &first_stat) == 0);
     assert(stat(second, &second_stat) == 0);

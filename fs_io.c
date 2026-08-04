@@ -62,39 +62,6 @@ uint32_t fs_read_count(const Ixp9Req *r) {
     return count;
 }
 
-static char *read_link_target(const ResolvedPath *path, size_t hint,
-                              size_t *length) {
-    size_t size = hint ? hint + 1 : 128;
-
-    for(;;) {
-        char *target;
-        ssize_t count;
-
-        if(size > SIZE_MAX / 2) {
-            errno = ENAMETOOLONG;
-            return NULL;
-        }
-        target = s9_malloc(size);
-        if(!target) {
-            errno = ENOMEM;
-            return NULL;
-        }
-        count = platform_readlink(path, target, size);
-        if(count < 0) {
-            int error = errno;
-            s9_free(target);
-            errno = error;
-            return NULL;
-        }
-        if((size_t)count < size) {
-            *length = (size_t)count;
-            return target;
-        }
-        s9_free(target);
-        size *= 2;
-    }
-}
-
 void fs_read(Ixp9Req *r) {
     FidState *state = r->fid->aux;
 
@@ -212,9 +179,9 @@ void fs_open(Ixp9Req *r) {
             respond_errno(r, EACCES);
             return;
         }
-        state->symlink = read_link_target(&resolved,
-                                          (size_t)st.st_size,
-                                          &state->symlink_length);
+        state->symlink = read_symlink_target(&resolved,
+                                             (size_t)st.st_size,
+                                             &state->symlink_length);
         if(!state->symlink) {
             respond_errno(r, errno);
             return;
@@ -274,7 +241,7 @@ void fs_create(Ixp9Req *r) {
         respond_errno(r, EROFS);
         return;
     }
-    if(namespace_is_protected(state->path)) {
+    if(namespace_is_namespace_root(state->path)) {
         respond_errno(r, EPERM);
         return;
     }

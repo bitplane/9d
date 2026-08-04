@@ -76,7 +76,7 @@ static int root_descriptor(const ResolvedPath *path) {
 
 static int open_parent(const ResolvedPath *path, char *leaf,
                        size_t leaf_size) {
-    char relative[PATH_MAX];
+    char relative[S9_PATH_MAX];
     char *component;
     char *next;
     int directory;
@@ -129,7 +129,7 @@ static int open_parent(const ResolvedPath *path, char *leaf,
 }
 
 int platform_lstat(const ResolvedPath *path, struct stat *st) {
-    char leaf[PATH_MAX];
+    char leaf[S9_PATH_MAX];
     int parent = open_parent(path, leaf, sizeof(leaf));
     int result;
     int error;
@@ -143,8 +143,14 @@ int platform_lstat(const ResolvedPath *path, struct stat *st) {
     return result;
 }
 
+int platform_lstat_child(DIR *directory, const ResolvedPath *path,
+                         const char *name, struct stat *st) {
+    (void)path;
+    return fstatat(dirfd(directory), name, st, AT_SYMLINK_NOFOLLOW);
+}
+
 int platform_open(const ResolvedPath *path, int flags, mode_t mode) {
-    char leaf[PATH_MAX];
+    char leaf[S9_PATH_MAX];
     int parent = open_parent(path, leaf, sizeof(leaf));
     int descriptor;
     int error;
@@ -174,7 +180,7 @@ DIR *platform_opendir(const ResolvedPath *path) {
 }
 
 ssize_t platform_readlink(const ResolvedPath *path, char *buffer, size_t size) {
-    char leaf[PATH_MAX];
+    char leaf[S9_PATH_MAX];
     int parent = open_parent(path, leaf, sizeof(leaf));
     ssize_t result;
     int error;
@@ -189,7 +195,7 @@ ssize_t platform_readlink(const ResolvedPath *path, char *buffer, size_t size) {
 }
 
 int platform_access_execute(const ResolvedPath *path) {
-    char leaf[PATH_MAX];
+    char leaf[S9_PATH_MAX];
     int parent = open_parent(path, leaf, sizeof(leaf));
     int result;
     int error;
@@ -204,7 +210,7 @@ int platform_access_execute(const ResolvedPath *path) {
 }
 
 int platform_mkdir(const ResolvedPath *path, mode_t mode) {
-    char leaf[PATH_MAX];
+    char leaf[S9_PATH_MAX];
     int parent = open_parent(path, leaf, sizeof(leaf));
     int result;
     int error;
@@ -219,7 +225,7 @@ int platform_mkdir(const ResolvedPath *path, mode_t mode) {
 }
 
 int platform_symlink(const char *target, const ResolvedPath *path) {
-    char leaf[PATH_MAX];
+    char leaf[S9_PATH_MAX];
     int parent = open_parent(path, leaf, sizeof(leaf));
     int result;
     int error;
@@ -234,7 +240,7 @@ int platform_symlink(const char *target, const ResolvedPath *path) {
 }
 
 int platform_remove(const ResolvedPath *path, int directory) {
-    char leaf[PATH_MAX];
+    char leaf[S9_PATH_MAX];
     int parent = open_parent(path, leaf, sizeof(leaf));
     int result;
     int error;
@@ -250,8 +256,8 @@ int platform_remove(const ResolvedPath *path, int directory) {
 
 int platform_rename(const ResolvedPath *old_path,
                     const ResolvedPath *new_path) {
-    char old_leaf[PATH_MAX];
-    char new_leaf[PATH_MAX];
+    char old_leaf[S9_PATH_MAX];
+    char new_leaf[S9_PATH_MAX];
     int old_parent = open_parent(old_path, old_leaf, sizeof(old_leaf));
     int new_parent;
     int result;
@@ -275,7 +281,7 @@ int platform_rename(const ResolvedPath *old_path,
 }
 
 int platform_chmod(const ResolvedPath *path, mode_t mode) {
-    char leaf[PATH_MAX];
+    char leaf[S9_PATH_MAX];
     int parent = open_parent(path, leaf, sizeof(leaf));
     int result;
     int error;
@@ -290,7 +296,7 @@ int platform_chmod(const ResolvedPath *path, mode_t mode) {
 }
 
 int platform_set_times(const ResolvedPath *path, time_t atime, time_t mtime) {
-    char leaf[PATH_MAX];
+    char leaf[S9_PATH_MAX];
     struct timespec times[2];
     int parent = open_parent(path, leaf, sizeof(leaf));
     int result;

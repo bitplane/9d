@@ -9,6 +9,8 @@
 #include <utime.h>
 
 int platform_lstat(const ResolvedPath *path, struct stat *st);
+int platform_lstat_child(DIR *directory, const ResolvedPath *path,
+                         const char *name, struct stat *st);
 int platform_open(const ResolvedPath *path, int flags, mode_t mode);
 DIR *platform_opendir(const ResolvedPath *path);
 ssize_t platform_readlink(const ResolvedPath *path, char *buffer, size_t size);

@@ -154,7 +154,7 @@ static int parent_is_exported(const ResolvedPath *path) {
     const char *root_name = namespace.synthetic
                           ? namespace.roots[path->root_index].path
                           : namespace.native_root;
-    char parent[PATH_MAX];
+    char parent[S9_PATH_MAX];
     char *slash;
     BPTR root;
     BPTR current;
@@ -203,6 +203,13 @@ int platform_lstat(const ResolvedPath *path, struct stat *st) {
     if(!parent_is_exported(path))
         return -1;
     return lstat(path->native_path, st);
+}
+
+int platform_lstat_child(DIR *directory, const ResolvedPath *path,
+                         const char *name, struct stat *st) {
+    (void)directory;
+    (void)name;
+    return platform_lstat(path, st);
 }
 
 int platform_open(const ResolvedPath *path, int flags, mode_t mode) {

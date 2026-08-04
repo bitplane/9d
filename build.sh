@@ -1,4 +1,7 @@
 #!/bin/sh
+set -eu
 
-git clone --depth 1 --branch simple9p-0.3 https://github.com/bitplane/libixp.git
-make
+root=$(CDPATH= cd "$(dirname "$0")" && pwd)
+cd "$root"
+make deps
+exec make "$@"

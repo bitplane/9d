@@ -220,21 +220,26 @@ static IxpFcall wstat_fid(Client *client, uint32_t fid, IxpStat *stat) {
     return rpc(client, &request);
 }
 
-static IxpQid stat_qid(Client *client, uint32_t fid) {
+static IxpStat unpack_stat(Client *client, uint32_t fid) {
     IxpFcall response;
     IxpStat stat = {0};
     IxpMsg message;
-    IxpQid qid;
 
     response = stat_fid(client, fid);
-    expect_type("stat qid", &response, P9_RStat);
+    expect_type("stat", &response, P9_RStat);
     message = ixp_message((char *)response.rstat.stat,
                           response.rstat.nstat, MsgUnpack);
     message.version = client->version;
     ixp_pstat(&message, &stat);
-    qid = stat.qid;
-    ixp_freestat(&stat);
     ixp_freefcall(&response);
+    return stat;
+}
+
+static IxpQid stat_qid(Client *client, uint32_t fid) {
+    IxpStat stat = unpack_stat(client, fid);
+    IxpQid qid = stat.qid;
+
+    ixp_freestat(&stat);
     return qid;
 }
 
@@ -285,10 +290,14 @@ static pid_t start_server_mode(const char *binary, const char *root,
         close(sockets[0]);
         assert(dup2(sockets[1], STDIN_FILENO) == STDIN_FILENO);
         close(sockets[1]);
-        if(read_only)
+        if(read_only && root)
             execl(binary, binary, "-r", "-p", "-", root, (char *)NULL);
-        else
+        else if(read_only)
+            execl(binary, binary, "-r", "-p", "-", (char *)NULL);
+        else if(root)
             execl(binary, binary, "-p", "-", root, (char *)NULL);
+        else
+            execl(binary, binary, "-p", "-", (char *)NULL);
         _exit(127);
     }
     close(sockets[1]);
@@ -414,6 +423,7 @@ static void test_truncate_and_symlink(Client *client, const char *root) {
     const char *truncate_name[] = { "truncate" };
     const char *link_name[] = { "link" };
     IxpFcall response;
+    IxpStat link_stat;
     struct stat st;
     char path[1024];
 
@@ -452,6 +462,10 @@ static void test_truncate_and_symlink(Client *client, const char *root) {
     response = open_fid(client, 21, P9_OREAD);
     expect_type("open symlink", &response, P9_ROpen);
     ixp_freefcall(&response);
+    link_stat = unpack_stat(client, 21);
+    assert(link_stat.length == strlen("target/path"));
+    assert(strcmp(link_stat.extension, "target/path") == 0);
+    ixp_freestat(&link_stat);
     response = read_fid(client, 21, 3, 4);
     expect_type("ranged symlink read", &response, P9_RRead);
     assert(response.rread.count == 4);
@@ -468,6 +482,8 @@ static void test_directory_offsets(Client *client) {
     IxpFcall response;
     uint32_t first_count;
     uint32_t full_count;
+    uint64_t offset;
+    unsigned int index;
 
     response = walk(client, 1, 30, directory, 1);
     expect_type("walk directory", &response, P9_RWalk);
@@ -482,6 +498,18 @@ static void test_directory_offsets(Client *client) {
     ixp_freefcall(&response);
     response = read_fid(client, 30, first_count, 100);
     expect_type("checkpoint directory read", &response, P9_RRead);
+    ixp_freefcall(&response);
+    offset = first_count;
+    for(index = 0; index < 20; index++) {
+        response = read_fid(client, 30, offset, 100);
+        expect_type("advance directory checkpoints", &response, P9_RRead);
+        assert(response.rread.count > 0);
+        offset += response.rread.count;
+        ixp_freefcall(&response);
+    }
+    response = read_fid(client, 30, first_count, 100);
+    expect_type("rescan evicted directory checkpoint", &response, P9_RRead);
+    assert(response.rread.count > 0);
     ixp_freefcall(&response);
     response = read_fid(client, 30, 1, 100);
     expect_type("mid-entry directory offset", &response, P9_RError);
@@ -930,22 +958,110 @@ static void test_read_only(const char *binary, const char *root) {
     assert(access(path, F_OK) < 0 && errno == ENOENT);
 }
 
+static void test_synthetic_namespace(const char *binary,
+                                     const char *first_root,
+                                     const char *second_root) {
+    const char *first[] = { "First" };
+    const char *created[] = { "created" };
+    IxpFcall response;
+    IxpStat stat;
+    Client client;
+    pid_t child;
+    char path[1024];
+
+    assert(setenv("SIMPLE9P_TEST_ROOT_1", first_root, 1) == 0);
+    assert(setenv("SIMPLE9P_TEST_ROOT_2", second_root, 1) == 0);
+    child = start_server(binary, NULL, &client);
+
+    stat = unchanged_stat();
+    response = wstat_fid(&client, 1, &stat);
+    expect_type("synthetic root no-op wstat", &response, P9_RWStat);
+    ixp_freefcall(&response);
+
+    response = walk(&client, 1, 300, first, 1);
+    expect_type("walk synthetic export root", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    stat = unchanged_stat();
+    response = wstat_fid(&client, 300, &stat);
+    expect_type("export root no-op wstat", &response, P9_RWStat);
+    ixp_freefcall(&response);
+
+    response = walk(&client, 300, 301, NULL, 0);
+    expect_type("clone export root", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = create_fid(&client, 301, "created", 0600,
+                          P9_ORDWR, NULL);
+    expect_type("create inside export root", &response, P9_RCreate);
+    ixp_freefcall(&response);
+    response = write_fid(&client, 301, 0, "synthetic", 9);
+    expect_type("write inside export root", &response, P9_RWrite);
+    ixp_freefcall(&response);
+
+    response = clunk(&client, 301);
+    expect_type("clunk created file", &response, P9_RClunk);
+    ixp_freefcall(&response);
+    response = walk(&client, 300, 304, created, 1);
+    expect_type("walk synthetic orclose file", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = open_fid(&client, 304, P9_OREAD | P9_ORCLOSE);
+    expect_type("open synthetic orclose file", &response, P9_ROpen);
+    ixp_freefcall(&response);
+    response = clunk(&client, 304);
+    expect_type("close before synthetic orclose remove", &response,
+                P9_RClunk);
+    ixp_freefcall(&response);
+
+    stat = unchanged_stat();
+    stat.name = "Renamed";
+    response = wstat_fid(&client, 300, &stat);
+    expect_error("protect export root rename", &response, EPERM);
+    ixp_freefcall(&response);
+
+    response = walk(&client, 1, 302, first, 1);
+    expect_type("walk protected export root", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = remove_fid(&client, 302);
+    expect_error("protect export root removal", &response, EPERM);
+    ixp_freefcall(&response);
+
+    response = walk(&client, 1, 303, NULL, 0);
+    expect_type("clone synthetic root", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = create_fid(&client, 303, "Third", 0600, P9_ORDWR, NULL);
+    expect_error("protect synthetic root listing", &response, EPERM);
+    ixp_freefcall(&response);
+    stop_server(&client, child);
+    unsetenv("SIMPLE9P_TEST_ROOT_1");
+    unsetenv("SIMPLE9P_TEST_ROOT_2");
+
+    make_path(path, sizeof(path), first_root, "created");
+    assert(access(path, F_OK) < 0 && errno == ENOENT);
+}
+
 int main(int argc, char **argv) {
     char template[] = "/tmp/simple9p-protocol-XXXXXX";
     char outside_template[] = "/tmp/simple9p-outside-XXXXXX";
+    char first_template[] = "/tmp/simple9p-first-XXXXXX";
+    char second_template[] = "/tmp/simple9p-second-XXXXXX";
     char path[1024];
     char second[1024];
     char *root;
     char *outside;
+    char *first_root;
+    char *second_root;
     Client client;
     pid_t child;
     unsigned int index;
 
-    assert(argc == 2);
+    assert(argc == 2 || argc == 3);
     root = mkdtemp(template);
     assert(root);
     outside = mkdtemp(outside_template);
     assert(outside);
+    first_root = mkdtemp(first_template);
+    assert(first_root);
+    second_root = mkdtemp(second_template);
+    assert(second_root);
     make_path(path, sizeof(path), root, "dir");
     assert(mkdir(path, 0700) == 0);
     make_path(path, sizeof(path), root, "dir/file");
@@ -958,7 +1074,7 @@ int main(int argc, char **argv) {
     write_pattern_file(path, IXP_MAX_MSG * 2U);
     make_path(path, sizeof(path), root, "entries");
     assert(mkdir(path, 0700) == 0);
-    for(index = 0; index < 4; index++) {
+    for(index = 0; index < 32; index++) {
         assert(snprintf(second, sizeof(second), "%s/item-%u", path, index) <
                (int)sizeof(second));
         write_file(second, "x");
@@ -1015,9 +1131,11 @@ int main(int argc, char **argv) {
     test_partial_wstat_qid(&client, root);
     stop_server(&client, child);
     test_read_only(argv[1], root);
+    if(argc == 3)
+        test_synthetic_namespace(argv[2], first_root, second_root);
 
     make_path(path, sizeof(path), root, "entries");
-    for(index = 0; index < 4; index++) {
+    for(index = 0; index < 32; index++) {
         assert(snprintf(second, sizeof(second), "%s/item-%u", path, index) <
                (int)sizeof(second));
         assert(unlink(second) == 0);
@@ -1042,6 +1160,8 @@ int main(int argc, char **argv) {
     assert(rmdir(root) == 0);
     make_path(path, sizeof(path), outside, "secret"); unlink(path);
     assert(rmdir(outside) == 0);
+    assert(rmdir(first_root) == 0);
+    assert(rmdir(second_root) == 0);
     puts("protocol tests passed");
     return 0;
 }

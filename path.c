@@ -66,32 +66,6 @@ const char *path_basename(const char *path) {
     return slash ? slash + 1 : path;
 }
 
-int path_parent(const char *path, char *parent, size_t size) {
-    char *slash;
-    size_t length;
-
-    if(!path || !parent || size == 0)
-        return -1;
-    length = strlen(path);
-    if(length >= size)
-        return -1;
-    strcpy(parent, path);
-    cleanname(parent);
-    if(strcmp(parent, "/") == 0)
-        return 0;
-    slash = strrchr(parent, '/');
-    if(!slash) {
-        if(size < 2)
-            return -1;
-        strcpy(parent, ".");
-    } else if(slash == parent) {
-        parent[1] = '\0';
-    } else {
-        *slash = '\0';
-    }
-    return 0;
-}
-
 /*
  * Join host paths without assuming that a root ends in '/'. Amiga-style
  * volume roots, such as "SYS:", already contain their path separator.
@@ -113,18 +87,5 @@ int joinpath(char *dst, size_t dstsize, const char *dir, const char *name) {
 
     if(snprintf(dst, dstsize, "%s%s%s", dir, separator, name) >= (int)dstsize)
         return -1;
-    return 0;
-}
-
-/* Safe string operations */
-int safe_strcat(char *dst, const char *src, size_t dstsize) {
-    size_t dstlen = strlen(dst);
-    size_t srclen = strlen(src);
-    
-    if(dstlen + srclen >= dstsize) {
-        return -1;
-    }
-    
-    strcat(dst, src);
     return 0;
 }

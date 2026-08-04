@@ -8,10 +8,15 @@ Uses [libixp](https://github.com/0intro/libixp)
 
 ## Building
 
-Run `make` to build a server with connected-stream and network transports.
+Run `make deps`, then `make` to build a server with connected-stream and network
+transports.
 
 For guests that only use an already-connected stream, such as a serial port,
 build with `make NETWORK=0`.
+
+`make release` produces an optimized, stripped binary. Embedded builds can set
+`S9_PATH_MAX` to reduce request stack usage; `make check-embedded` verifies the
+1024-byte appliance profile.
 
 ## Usage
 
@@ -19,23 +24,19 @@ build with `make NETWORK=0`.
 simple9p [-d] [-r] [-p address] [directory]
 ```
 
-Use `-r` to reject opens and operations that could modify the exported
-filesystem. Writable service remains the default.
+Use `-r` for read only.
 
-Without a dir, simple9p serves the platform's filesystem namespace: `/` on
-Unix-like systems, or a startup snapshot of mounted volumes beneath a synthetic
-`/` on Amiga-like systems. The namespace remains fixed for the life of the
-server.
+Without a dir, simple9p serves the platform's filesystem root: `/` on
+Unix-like systems, or a path above the volumes elsewhere.
 
-With network support enabled, the default address is `tcp!localhost!564`.
-Use `-p -` for a bidirectional standard-input stream or `-p stream!path` for
-an already-connected device such as a serial port.
+The default address for a network server is `tcp!localhost!564`.
+Use `-p -` for stdio or `-p stream!path` for an existing device like a serial
+port.
 
 ## Status
 
 This is slowly evolving into something that actually works. It's becoming more
-robust, but it's still not tested enough to be deemed trustworthy - use at your
-own risk.
+robust, but don't consider it trustworthy - use at your own risk.
 
 ## License
 

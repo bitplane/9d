@@ -26,6 +26,40 @@ void respond_errno(Ixp9Req *r, int error) {
     ixp_respond(r, strerror(error));
 }
 
+char *read_symlink_target(const ResolvedPath *path, size_t hint,
+                          size_t *length) {
+    size_t size = hint < SIZE_MAX ? hint + 1 : 0;
+
+    if(size < 2)
+        size = 128;
+    for(;;) {
+        char *target = s9_malloc(size);
+        ssize_t count;
+
+        if(!target)
+            return NULL;
+        count = platform_readlink(path, target, size - 1);
+        if(count < 0) {
+            int error = errno;
+            s9_free(target);
+            errno = error;
+            return NULL;
+        }
+        if((size_t)count < size - 1) {
+            target[count] = '\0';
+            if(length)
+                *length = (size_t)count;
+            return target;
+        }
+        s9_free(target);
+        if(size > SIZE_MAX / 2) {
+            errno = ENAMETOOLONG;
+            return NULL;
+        }
+        size *= 2;
+    }
+}
+
 static void set_qid(IxpQid *qid, const ResolvedPath *resolved,
                     const struct stat *st) {
     if(resolved->synthetic) {
@@ -63,8 +97,6 @@ void fid_state_unregister(FidState *state) {
 }
 
 void fid_state_close(FidState *state) {
-    DirCheckpoint *checkpoint;
-
     if(!state)
         return;
     if(state->fd >= 0) {
@@ -82,10 +114,8 @@ void fid_state_close(FidState *state) {
     state->remove_on_close = 0;
     state->open_mode = 0;
     state->open_flags = 0;
-    while((checkpoint = state->checkpoints) != NULL) {
-        state->checkpoints = checkpoint->next;
-        s9_free(checkpoint);
-    }
+    state->checkpoint_count = 0;
+    state->checkpoint_next = 0;
     state->dir_offset = 0;
 }
 
@@ -231,6 +261,7 @@ void fs_clunk(Ixp9Req *r) {
             respond_errno(r, errno);
             return;
         }
+        fid_state_close(state);
         if(platform_remove(&resolved, S_ISDIR(st.st_mode)) < 0) {
             respond_errno(r, errno);
             return;

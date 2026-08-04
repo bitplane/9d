@@ -9,13 +9,13 @@
 #include "namespace.h"
 
 #define nil NULL
+#define S9_DIR_CHECKPOINTS 16
 
 typedef struct FidState FidState;
 
 typedef struct DirCheckpoint {
     uint64_t offset;
     long cookie;
-    struct DirCheckpoint *next;
 } DirCheckpoint;
 
 typedef struct Simple9pServer {
@@ -40,7 +40,9 @@ struct FidState {
     char *symlink;
     size_t symlink_length;
     uint64_t dir_offset;
-    DirCheckpoint *checkpoints;
+    DirCheckpoint checkpoints[S9_DIR_CHECKPOINTS];
+    size_t checkpoint_count;
+    size_t checkpoint_next;
     int remove_on_close;
     int stat_valid;
     struct stat opened_stat;
@@ -65,13 +67,13 @@ void qid_bump(void);
 void simple9p_state_cleanup(void);
 void respond_errno(Ixp9Req *r, int error);
 uint32_t fs_read_count(const Ixp9Req *r);
+char *read_symlink_target(const ResolvedPath *path, size_t hint,
+                          size_t *length);
 
 /* Path functions */
 void cleanname(char *name);
 const char *path_basename(const char *path);
-int path_parent(const char *path, char *parent, size_t size);
 int joinpath(char *dst, size_t dstsize, const char *dir, const char *name);
-int safe_strcat(char *dst, const char *src, size_t dstsize);
 
 /* Filesystem operations */
 void fs_attach(Ixp9Req *r);

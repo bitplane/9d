@@ -1,7 +1,12 @@
+include deps.mk
+
 CC ?= gcc
+AR ?= ar
+STRIP ?= strip
 CPPFLAGS += -D_XOPEN_SOURCE=700 -Ilibixp/include
 CFLAGS += -g -O0
 LDFLAGS += -static
+DEPFLAGS = -MMD -MP
 LIBS = build/libixp.a -lpthread
 LIBIXP_CFLAGS = $(filter-out -Wall -Wextra -Wpedantic -Wconversion \
 	-Wshadow -Wformat=2 -Werror,$(CFLAGS))
@@ -9,6 +14,8 @@ WARNING_CFLAGS = -g -O2 -Wall -Wextra -Wpedantic -Wconversion -Wshadow \
 	-Wformat=2 -Werror
 SANITIZER_FLAGS = -g -O1 -fno-omit-frame-pointer \
 	-fsanitize=address,undefined
+RELEASE_CFLAGS ?= -Os -DNDEBUG
+EMBEDDED_PATH_MAX ?= 1024
 
 NETWORK ?= 1
 ifeq ($(NETWORK),0)
@@ -19,32 +26,58 @@ endif
 
 PLATFORM ?= posix
 SRCS = simple9p.c alloc.c path.c namespace.c platform_$(PLATFORM).c \
-       fs_ops.c fs_io.c fs_stat.c fs_dir.c
+	fs_ops.c fs_io.c fs_stat.c fs_dir.c
 OBJS = $(patsubst %.c,build/%.o,$(SRCS))
 TARGET = build/simple9p
+LIBIXP_NAMES = convert error map message request rpc server socket transport \
+	util timer client thread
+LIBIXP_SRCS = $(addprefix libixp/lib/libixp/,$(addsuffix .c,$(LIBIXP_NAMES)))
+LIBIXP_OBJS = $(addprefix build/libixp/,$(addsuffix .o,$(LIBIXP_NAMES)))
+DEPS = $(OBJS:.o=.d) $(LIBIXP_OBJS:.o=.d) \
+	build/platform_posix-synthetic.d
 
-all: build libixp $(TARGET)
+ifeq ($(wildcard libixp/lib/libixp),)
+ifneq ($(filter deps clean distclean dist,$(MAKECMDGOALS)),)
+else
+$(error libixp is missing; run 'make deps' first)
+endif
+endif
 
-$(TARGET): $(OBJS) libixp
+all: $(TARGET)
+
+$(TARGET): $(OBJS) build/libixp.a
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 
-build/%.o: %.c server.h | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+build/%.o: %.c | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-build:
-	mkdir -p build
+build/libixp/%.o: libixp/lib/libixp/%.c | build/libixp
+	$(CC) $(CPPFLAGS) $(LIBIXP_CFLAGS) $(DEPFLAGS) \
+		-Ilibixp/include -c $< -o $@
 
-libixp: | build
-	cd libixp/lib/libixp && \
-	for f in convert.c error.c map.c message.c request.c rpc.c server.c socket.c transport.c util.c timer.c client.c thread.c; do \
-		$(CC) $(CPPFLAGS) $(LIBIXP_CFLAGS) -I../../include -c $$f -o $$(pwd)/../../../build/$${f%.c}.o || exit 1; \
-	done
-	ar rcs build/libixp.a build/convert.o build/error.o build/map.o build/message.o \
-		build/request.o build/rpc.o build/server.o build/socket.o build/transport.o \
-		build/util.o build/timer.o build/client.o build/thread.o
+build/libixp.a: $(LIBIXP_OBJS)
+	$(AR) rcs $@ $(LIBIXP_OBJS)
+
+build build/libixp:
+	mkdir -p $@
+
+deps:
+	./scripts/deps.sh
 
 clean:
 	rm -rf build
+
+distclean: clean
+	./scripts/clean-deps.sh
+	rm -rf dist
+
+release:
+	$(MAKE) clean
+	$(MAKE) CFLAGS="$(RELEASE_CFLAGS)" all
+	$(STRIP) $(TARGET)
+
+dist: deps
+	VERSION="$(VERSION)" ./scripts/dist.sh
 
 test/9pfuse/build/9pfuse:
 	@if [ ! -d test/9pfuse ]; then \
@@ -66,8 +99,8 @@ test-build-options:
 test-namespace: build/namespace_test
 	./build/namespace_test
 
-test-protocol: build/protocol_test build/simple9p
-	./build/protocol_test ./build/simple9p
+test-protocol: build/protocol_test build/simple9p build/simple9p-synthetic
+	./build/protocol_test ./build/simple9p ./build/simple9p-synthetic
 
 test-allocations: build/allocation_test
 	./build/allocation_test
@@ -75,7 +108,7 @@ test-allocations: build/allocation_test
 check-warnings:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="$(WARNING_CFLAGS)" LIBIXP_CFLAGS="-g -O2 -w" LDFLAGS= \
-		test-namespace test-allocations test-protocol build/simple9p-synthetic
+		test-namespace test-allocations test-protocol
 
 check-sanitizers:
 	$(MAKE) clean
@@ -83,31 +116,44 @@ check-sanitizers:
 		$(MAKE) CFLAGS="$(SANITIZER_FLAGS)" \
 		LIBIXP_CFLAGS="$(SANITIZER_FLAGS) -w" \
 		LDFLAGS="-fsanitize=address,undefined" \
-		test-namespace test-allocations test-protocol build/simple9p-synthetic
+		test-namespace test-allocations test-protocol
 
-build/namespace_test: test/namespace_test.c namespace.c namespace.h path.c alloc.c server.h | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test/namespace_test.c namespace.c path.c alloc.c
+check-embedded:
+	$(MAKE) clean
+	$(MAKE) CFLAGS="$(WARNING_CFLAGS) -DS9_PATH_MAX=$(EMBEDDED_PATH_MAX)" \
+		LIBIXP_CFLAGS="-g -O2 -w" LDFLAGS= \
+		test-namespace test-allocations test-protocol
 
-build/protocol_test: test/protocol_test.c libixp | build
+build/namespace_test: test/namespace_test.c namespace.c namespace.h path.c \
+		alloc.c server.h | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ \
+		test/namespace_test.c namespace.c path.c alloc.c
+
+build/protocol_test: test/protocol_test.c build/libixp.a | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test/protocol_test.c $(LIBS)
 
 build/allocation_test: test/allocation_test.c alloc.c path.c namespace.c \
-		platform_posix.c fs_ops.c fs_stat.c libixp | build
+		platform_posix.c fs_ops.c fs_stat.c build/libixp.a | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DSIMPLE9P_TESTING -o $@ \
 		test/allocation_test.c alloc.c path.c namespace.c platform_posix.c \
 		fs_ops.c fs_stat.c $(LIBS)
 
 build/platform_posix-synthetic.o: platform_posix.c platform.h namespace.h | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) \
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) \
 		-Dplatform_namespace_init=platform_namespace_init_native \
+		-Dplatform_remove=platform_remove_native \
 		-c platform_posix.c -o $@
 
-build/simple9p-synthetic: simple9p.c alloc.c path.c namespace.c test/platform_synthetic.c \
-						 fs_ops.c fs_io.c fs_stat.c fs_dir.c server.h namespace.h \
-						 build/platform_posix-synthetic.o libixp | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ simple9p.c alloc.c path.c namespace.c \
+build/simple9p-synthetic: simple9p.c alloc.c path.c namespace.c \
 		test/platform_synthetic.c fs_ops.c fs_io.c fs_stat.c fs_dir.c \
+		server.h namespace.h build/platform_posix-synthetic.o build/libixp.a | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ \
+		simple9p.c alloc.c path.c namespace.c test/platform_synthetic.c \
+		fs_ops.c fs_io.c fs_stat.c fs_dir.c \
 		build/platform_posix-synthetic.o $(LIBS)
 
-.PHONY: all clean libixp test test-build-options test-namespace test-protocol \
-	test-allocations check-warnings check-sanitizers
+-include $(DEPS)
+
+.PHONY: all deps clean distclean release dist test test-build-options \
+	test-namespace test-protocol test-allocations check-warnings \
+	check-sanitizers check-embedded
