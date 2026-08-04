@@ -2,6 +2,10 @@
 #define _DARWIN_C_SOURCE
 #endif
 
+#if defined(__NetBSD__) && !defined(_NETBSD_SOURCE)
+#define _NETBSD_SOURCE
+#endif
+
 #include "platform.h"
 
 #include <errno.h>
