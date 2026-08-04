@@ -16,7 +16,7 @@ WORKDIR /build
 COPY *.c *.h Makefile ./
 
 # Clone the tested libixp integration release
-RUN git clone --depth 1 --branch qemount-0.2 https://github.com/bitplane/libixp.git && \
+RUN git clone --depth 1 --branch simple9p-0.3 https://github.com/bitplane/libixp.git && \
     make
 
 # serve
