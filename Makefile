@@ -3,7 +3,8 @@ include deps.mk
 CC ?= gcc
 AR ?= ar
 STRIP ?= strip
-CPPFLAGS += -D_XOPEN_SOURCE=700 -Ilibixp/include
+CPPFLAGS += -D_XOPEN_SOURCE=700 -D_POSIX_C_SOURCE=200809L \
+	-Ilibixp/include
 CFLAGS += -g -O0
 LDFLAGS += -static
 DEPFLAGS = -MMD -MP
