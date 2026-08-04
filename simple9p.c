@@ -86,7 +86,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "              Use stream!path for a connected stream device\n");
 #ifndef SIMPLE9P_NO_NETWORK
     fprintf(stderr, "              Otherwise listen on a libixp network address\n");
-    fprintf(stderr, "              (default: tcp!*!564)\n");
+    fprintf(stderr, "              (default: tcp!localhost!564)\n");
 #endif
     fprintf(stderr, "  directory   Root to serve (default: platform namespace)\n");
 }
@@ -130,7 +130,7 @@ int main(int argc, char *argv[]) {
         usage(argv[0]);
         exit(1);
 #else
-        addr = "tcp!*!564";
+        addr = "tcp!localhost!564";
 #endif
     }
     
@@ -152,6 +152,7 @@ int main(int argc, char *argv[]) {
         /* Serve on stdin/stdout */
         serve_stream(fd);
 
+        simple9p_state_cleanup();
         namespace_cleanup();
         return 0;
     }
@@ -173,8 +174,6 @@ int main(int argc, char *argv[]) {
         
         /* Serve the connected stream directly */
         serve_stream(fd);
-        
-        close(fd);
     }
 #ifndef SIMPLE9P_NO_NETWORK
     else {
@@ -201,6 +200,7 @@ int main(int argc, char *argv[]) {
     }
 #endif
     
+    simple9p_state_cleanup();
     namespace_cleanup();
     return 0;
 }

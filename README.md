@@ -24,14 +24,22 @@ serves the platform's filesystem namespace: `/` on Unix-like systems, or a
 startup snapshot of mounted volumes beneath a synthetic `/` on Amiga-like
 systems. The namespace remains fixed for the life of the server.
 
+With network support enabled, the default address is `tcp!localhost!564`.
+Use `-p -` for a bidirectional standard-input stream or `-p stream!path` for
+an already-connected device such as a serial port.
+
 ## Status
 
 This will eventually evolve into the default `qemount`'s back-end, unless I
 find something better.
 
-While 2000.U support now works and the tests pass, it still shouldn't be
-considered trustworthy end to end. Expect weird edge cases and bugs that might
-mangle files.
+Fids retain their opened file, directory or symlink until clunk, so later path
+renames and removals do not silently redirect I/O. POSIX exports anchor path
+resolution at the original root directory and reject symlinks in intermediate
+components. The direct protocol tests cover walk, mutation, metadata, directory
+offset, symlink, containment and allocation-failure behaviour, but the server
+is still young enough that important data should be served read-only or backed
+up.
 
 ## License
 

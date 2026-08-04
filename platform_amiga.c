@@ -1,6 +1,8 @@
 #include "namespace.h"
+#include "platform.h"
 
 #include <dos/dosextens.h>
+#include <dos/dos.h>
 #include <exec/types.h>
 #include <proto/dos.h>
 
@@ -9,11 +11,67 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <utime.h>
 
 typedef struct VolumeName {
     struct VolumeName *next;
     char name[256];
 } VolumeName;
+
+static BPTR native_root;
+static BPTR *synthetic_roots;
+static size_t synthetic_root_count;
+
+void platform_namespace_cleanup(Namespace *ns) {
+    size_t index;
+
+    (void)ns;
+    if(native_root) {
+        UnLock(native_root);
+        native_root = BNULL;
+    }
+    for(index = 0; index < synthetic_root_count; index++) {
+        if(synthetic_roots[index])
+            UnLock(synthetic_roots[index]);
+    }
+    free(synthetic_roots);
+    synthetic_roots = NULL;
+    synthetic_root_count = 0;
+}
+
+int platform_namespace_ready(Namespace *ns) {
+    size_t index;
+
+    platform_namespace_cleanup(ns);
+    if(!ns->synthetic) {
+        native_root = Lock((STRPTR)ns->native_root, ACCESS_READ);
+        if(!native_root) {
+            errno = EACCES;
+            return -1;
+        }
+        return 0;
+    }
+    if(!ns->nroots)
+        return 0;
+    synthetic_roots = calloc(ns->nroots, sizeof(*synthetic_roots));
+    if(!synthetic_roots) {
+        errno = ENOMEM;
+        return -1;
+    }
+    synthetic_root_count = ns->nroots;
+    for(index = 0; index < ns->nroots; index++) {
+        synthetic_roots[index] = Lock((STRPTR)ns->roots[index].path,
+                                      ACCESS_READ);
+        if(!synthetic_roots[index]) {
+            platform_namespace_cleanup(ns);
+            errno = EACCES;
+            return -1;
+        }
+    }
+    return 0;
+}
 
 static void free_names(VolumeName *names) {
     while(names) {
@@ -90,4 +148,129 @@ int platform_namespace_init(Namespace *ns) {
         return -1;
     }
     return 0;
+}
+
+static int parent_is_exported(const ResolvedPath *path) {
+    const char *root_name = namespace.synthetic
+                          ? namespace.roots[path->root_index].path
+                          : namespace.native_root;
+    char parent[PATH_MAX];
+    char *slash;
+    BPTR root;
+    BPTR current;
+    int allowed = 0;
+
+    if(!path->relative_path[0])
+        return 1;
+    if(strlen(path->native_path) >= sizeof(parent)) {
+        errno = ENAMETOOLONG;
+        return 0;
+    }
+    strcpy(parent, path->native_path);
+    slash = strrchr(parent, '/');
+    if(slash)
+        *slash = '\0';
+    else
+        strcpy(parent, root_name);
+    root = DupLock(namespace.synthetic ? synthetic_roots[path->root_index]
+                                       : native_root);
+    current = Lock((STRPTR)parent, ACCESS_READ);
+    if(!root || !current)
+        goto done;
+    for(;;) {
+        BPTR next;
+        if(SameLock(root, current) == LOCK_SAME) {
+            allowed = 1;
+            break;
+        }
+        next = ParentDir(current);
+        UnLock(current);
+        current = next;
+        if(!current)
+            break;
+    }
+done:
+    if(current)
+        UnLock(current);
+    if(root)
+        UnLock(root);
+    if(!allowed)
+        errno = EPERM;
+    return allowed;
+}
+
+int platform_lstat(const ResolvedPath *path, struct stat *st) {
+    if(!parent_is_exported(path))
+        return -1;
+    return lstat(path->native_path, st);
+}
+
+int platform_open(const ResolvedPath *path, int flags, mode_t mode) {
+    if(!parent_is_exported(path))
+        return -1;
+    return open(path->native_path, flags, mode);
+}
+
+DIR *platform_opendir(const ResolvedPath *path) {
+    if(!parent_is_exported(path))
+        return NULL;
+    return opendir(path->native_path);
+}
+
+ssize_t platform_readlink(const ResolvedPath *path, char *buffer, size_t size) {
+    if(!parent_is_exported(path))
+        return -1;
+    return readlink(path->native_path, buffer, size);
+}
+
+int platform_access_execute(const ResolvedPath *path) {
+    if(!parent_is_exported(path))
+        return -1;
+    return access(path->native_path, X_OK);
+}
+
+int platform_mkdir(const ResolvedPath *path, mode_t mode) {
+    if(!parent_is_exported(path))
+        return -1;
+    return mkdir(path->native_path, mode);
+}
+
+int platform_symlink(const char *target, const ResolvedPath *path) {
+    if(!parent_is_exported(path))
+        return -1;
+    return symlink(target, path->native_path);
+}
+
+int platform_remove(const ResolvedPath *path, int directory) {
+    if(!parent_is_exported(path))
+        return -1;
+    return directory ? rmdir(path->native_path) : unlink(path->native_path);
+}
+
+int platform_rename(const ResolvedPath *old_path,
+                    const ResolvedPath *new_path) {
+    if(!parent_is_exported(old_path) || !parent_is_exported(new_path))
+        return -1;
+    return rename(old_path->native_path, new_path->native_path);
+}
+
+int platform_chmod(const ResolvedPath *path, mode_t mode) {
+    if(!parent_is_exported(path))
+        return -1;
+    return chmod(path->native_path, mode);
+}
+
+int platform_set_times(const ResolvedPath *path, time_t atime, time_t mtime) {
+    struct utimbuf times;
+    if(!parent_is_exported(path))
+        return -1;
+    times.actime = atime;
+    times.modtime = mtime;
+    return utime(path->native_path, &times);
+}
+
+int platform_truncate(const ResolvedPath *path, off_t length) {
+    if(!parent_is_exported(path))
+        return -1;
+    return truncate(path->native_path, length);
 }

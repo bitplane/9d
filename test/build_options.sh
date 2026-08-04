@@ -12,6 +12,8 @@ make clean >/dev/null
 make NETWORK=1 >/dev/null
 ./build/simple9p -h 2>&1 \
 	| grep -q 'Otherwise listen on a libixp network address'
+./build/simple9p -h 2>&1 \
+	| grep -q 'default: tcp!localhost!564'
 nm build/simple9p | grep -q '[[:space:]]ixp_announce$'
 
 make clean >/dev/null

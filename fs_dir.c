@@ -1,35 +1,68 @@
 #include "server.h"
-#include <stdio.h>
+#include "platform.h"
+
+#include <errno.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <dirent.h>
-#include <errno.h>
 
-static int pack_entry(Ixp9Req *r, IxpMsg *message, IxpStat *stat,
-                      uint64_t *position) {
-    uint16_t length = ixp_sizeof_stat(stat, ixp_req_getversion(r));
-    uint64_t offset = r->ifcall.tread.offset;
+static DirCheckpoint *find_checkpoint(FidState *state, uint64_t offset) {
+    DirCheckpoint *checkpoint;
 
-    if(*position + length <= offset) {
-        *position += length;
-        return 0;
+    for(checkpoint = state->checkpoints; checkpoint;
+        checkpoint = checkpoint->next) {
+        if(checkpoint->offset == offset)
+            return checkpoint;
     }
-    if((size_t)(message->end - message->pos) < length)
-        return 1;
-    ixp_pstat(message, stat);
-    *position += length;
+    return NULL;
+}
+
+static int remember_checkpoint(FidState *state, uint64_t offset,
+                               long cookie) {
+    DirCheckpoint *checkpoint;
+
+    if(find_checkpoint(state, offset))
+        return 0;
+    checkpoint = s9_malloc(sizeof(*checkpoint));
+    if(!checkpoint)
+        return -1;
+    checkpoint->offset = offset;
+    checkpoint->cookie = cookie;
+    checkpoint->next = state->checkpoints;
+    state->checkpoints = checkpoint;
     return 0;
 }
 
-void read_synthetic_directory(Ixp9Req *r) {
+static int seek_directory(FidState *state, uint64_t offset) {
+    DirCheckpoint *checkpoint;
+
+    if(offset == state->dir_offset)
+        return 0;
+    if(offset == 0) {
+        rewinddir(state->dir);
+        state->dir_offset = 0;
+        return 0;
+    }
+    checkpoint = find_checkpoint(state, offset);
+    if(!checkpoint) {
+        errno = EINVAL;
+        return -1;
+    }
+    seekdir(state->dir, checkpoint->cookie);
+    state->dir_offset = offset;
+    return 0;
+}
+
+void read_directory(Ixp9Req *r, FidState *state) {
     IxpMsg message;
     char *buffer;
-    uint64_t position = 0;
-    size_t i;
 
-    buffer = malloc(r->ifcall.tread.count);
+    if(seek_directory(state, r->ifcall.tread.offset) < 0) {
+        ixp_respond(r, strerror(errno));
+        return;
+    }
+    buffer = s9_malloc(r->ifcall.tread.count ? r->ifcall.tread.count : 1);
     if(!buffer) {
         ixp_respond(r, "out of memory");
         return;
@@ -37,176 +70,188 @@ void read_synthetic_directory(Ixp9Req *r) {
     message = ixp_message(buffer, r->ifcall.tread.count, MsgPack);
     message.version = ixp_req_getversion(r);
 
-    for(i = 0; i < namespace.nroots; i++) {
-        char virtual_path[PATH_MAX];
+    for(;;) {
+        long before = telldir(state->dir);
+        struct dirent *entry = readdir(state->dir);
+        char *virtual_path;
         ResolvedPath resolved;
         struct stat st;
         IxpStat stat;
+        uint16_t length;
+        long after;
 
-        if(snprintf(virtual_path, sizeof(virtual_path), "/%s",
-                    namespace.roots[i].name) >= (int)sizeof(virtual_path))
+        if(!entry)
+            break;
+        if(strcmp(entry->d_name, ".") == 0 ||
+           strcmp(entry->d_name, "..") == 0)
+            continue;
+        virtual_path = namespace_join_virtual_alloc(state->path,
+                                                    entry->d_name);
+        if(!virtual_path)
             continue;
         if(namespace_resolve(virtual_path, &resolved) < 0 ||
-           lstat(resolved.native_path, &st) < 0)
+           platform_lstat(&resolved, &st) < 0) {
+            s9_free(virtual_path);
             continue;
+        }
         memset(&stat, 0, sizeof(stat));
-        build_stat(&stat, virtual_path, resolved.native_path, &resolved, &st);
-        if(pack_entry(r, &message, &stat, &position)) {
+        if(build_stat(&stat, virtual_path, &resolved, &st, NULL) < 0) {
+            s9_free(virtual_path);
+            seekdir(state->dir, before);
+            s9_free(buffer);
+            ixp_respond(r, strerror(errno));
+            return;
+        }
+        s9_free(virtual_path);
+        length = ixp_sizeof_stat(&stat, ixp_req_getversion(r));
+        if((size_t)(message.end - message.pos) < length) {
             free_stat_strings(&stat);
+            seekdir(state->dir, before);
             break;
         }
+        after = telldir(state->dir);
+        if(remember_checkpoint(state, state->dir_offset + length, after) < 0) {
+            free_stat_strings(&stat);
+            seekdir(state->dir, before);
+            s9_free(buffer);
+            ixp_respond(r, strerror(errno));
+            return;
+        }
+        ixp_pstat(&message, &stat);
+        state->dir_offset += length;
         free_stat_strings(&stat);
     }
-
-    r->ofcall.rread.count = message.pos - buffer;
+    r->ofcall.rread.count = (uint32_t)(message.pos - buffer);
     r->ofcall.rread.data = buffer;
     ixp_respond(r, nil);
 }
 
-void read_directory(Ixp9Req *r, const char *path,
-                    const ResolvedPath *resolved) {
-    DIR *dir = opendir(resolved->native_path);
-    struct dirent *de;
-    IxpMsg m;
-    char *buf = NULL;
-    uint64_t pos = 0;
-    
-    if (!dir) {
-        ixp_respond(r, strerror(errno));
-        return;
-    }
-    
-    buf = malloc(r->ifcall.tread.count);
-    if (!buf) {
-        closedir(dir);
+void read_synthetic_directory(Ixp9Req *r, FidState *state) {
+    IxpMsg message;
+    char *buffer;
+    uint64_t position = 0;
+    size_t index;
+    int boundary = r->ifcall.tread.offset == 0;
+
+    (void)state;
+    buffer = s9_malloc(r->ifcall.tread.count ? r->ifcall.tread.count : 1);
+    if(!buffer) {
         ixp_respond(r, "out of memory");
         return;
     }
-    
-    m = ixp_message(buf, r->ifcall.tread.count, MsgPack);
-    m.version = ixp_req_getversion(r);
-    
-    /* Read directory entries, skipping until we reach the requested offset */
-    while ((de = readdir(dir))) {
-        IxpStat s;
-        struct stat st2;
-        char childpath[PATH_MAX];
-        char virtual_path[PATH_MAX];
-        ResolvedPath child;
-        
-        /* Clients synthesize dot entries and walk ".." through fs_walk. */
-        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
-            continue;
-        }
+    message = ixp_message(buffer, r->ifcall.tread.count, MsgPack);
+    message.version = ixp_req_getversion(r);
 
-        if(namespace_join_virtual(virtual_path, sizeof(virtual_path),
-                                  path, de->d_name) < 0)
+    for(index = 0; index < namespace.nroots; index++) {
+        char *virtual_path;
+        ResolvedPath resolved;
+        struct stat st;
+        IxpStat stat;
+        uint16_t length;
+
+        virtual_path = namespace_join_virtual_alloc("/",
+                                                    namespace.roots[index].name);
+        if(!virtual_path)
             continue;
-        if(namespace_resolve(virtual_path, &child) < 0)
-            continue;
-        strcpy(childpath, child.native_path);
-            
-        if (lstat(childpath, &st2) < 0) {
-            /* Failed to stat the entry, skip it */
+        if(namespace_resolve(virtual_path, &resolved) < 0 ||
+           platform_lstat(&resolved, &st) < 0) {
+            s9_free(virtual_path);
             continue;
         }
-        
-        memset(&s, 0, sizeof(IxpStat));
-        build_stat(&s, virtual_path, childpath, &child, &st2);
-        if(pack_entry(r, &m, &s, &pos)) {
-            free_stat_strings(&s);
+        memset(&stat, 0, sizeof(stat));
+        if(build_stat(&stat, virtual_path, &resolved, &st, NULL) < 0) {
+            s9_free(virtual_path);
+            s9_free(buffer);
+            ixp_respond(r, "out of memory");
+            return;
+        }
+        s9_free(virtual_path);
+        length = ixp_sizeof_stat(&stat, ixp_req_getversion(r));
+        if(position == r->ifcall.tread.offset)
+            boundary = 1;
+        if(position + length <= r->ifcall.tread.offset) {
+            position += length;
+            free_stat_strings(&stat);
+            continue;
+        }
+        if(!boundary) {
+            free_stat_strings(&stat);
+            s9_free(buffer);
+            ixp_respond(r, strerror(EINVAL));
+            return;
+        }
+        if((size_t)(message.end - message.pos) < length) {
+            free_stat_strings(&stat);
             break;
         }
-        free_stat_strings(&s);
+        ixp_pstat(&message, &stat);
+        position += length;
+        free_stat_strings(&stat);
     }
-    
-    closedir(dir);
-    r->ofcall.rread.count = m.pos - buf;
-    r->ofcall.rread.data = buf;
+    if(r->ifcall.tread.offset > position) {
+        s9_free(buffer);
+        ixp_respond(r, strerror(EINVAL));
+        return;
+    }
+    r->ofcall.rread.count = (uint32_t)(message.pos - buffer);
+    r->ofcall.rread.data = buffer;
     ixp_respond(r, nil);
-    /* buf is now owned by libixp */
 }
 
-void read_symlink(Ixp9Req *r, const char *fullpath) {
-    /* Add extra byte for null terminator */
-    size_t buf_size = r->ifcall.tread.count + 1;
-    char *buf = malloc(buf_size);
-    int n;
-    
-    if (!buf) {
+void read_symlink(Ixp9Req *r, FidState *state) {
+    uint64_t offset = r->ifcall.tread.offset;
+    size_t count;
+    char *buffer;
+
+    if(offset >= state->symlink_length)
+        count = 0;
+    else {
+        count = state->symlink_length - (size_t)offset;
+        if(count > r->ifcall.tread.count)
+            count = r->ifcall.tread.count;
+    }
+    buffer = s9_malloc(count ? count : 1);
+    if(!buffer) {
         ixp_respond(r, "out of memory");
         return;
     }
-    
-    /* We read one character less than the buffer size to ensure space for null terminator */
-    n = readlink(fullpath, buf, buf_size - 1);
-    if (n < 0) {
-        free(buf);
-        ixp_respond(r, strerror(errno));
-        return;
-    }
-    
-    /* Null-terminate the link target */
-    buf[n] = '\0';
-    
-    /* Respect the offset */
-    if (r->ifcall.tread.offset >= (uint64_t)n) {
-        /* Offset is beyond the data, return empty result */
-        r->ofcall.rread.count = 0;
-        r->ofcall.rread.data = buf;
-    } else {
-        /* Calculate how much data to return */
-        size_t len = n - r->ifcall.tread.offset;
-        if (len > r->ifcall.tread.count)
-            len = r->ifcall.tread.count;
-        
-        /* Move the data to the beginning of the buffer */
-        memmove(buf, buf + r->ifcall.tread.offset, len);
-        r->ofcall.rread.count = len;
-        r->ofcall.rread.data = buf;
-    }
-    
+    if(count)
+        memcpy(buffer, state->symlink + (size_t)offset, count);
+    r->ofcall.rread.count = (uint32_t)count;
+    r->ofcall.rread.data = buffer;
     ixp_respond(r, nil);
-    /* buf is now owned by libixp */
 }
 
-void read_file(Ixp9Req *r, const char *fullpath) {
-    int fd = open(fullpath, O_RDONLY);
-    char *buf = NULL;
-    
-    if (fd < 0) {
-        ixp_respond(r, strerror(errno));
+void read_file(Ixp9Req *r, FidState *state) {
+    off_t offset = (off_t)r->ifcall.tread.offset;
+    char *buffer;
+    ssize_t count;
+
+    if(offset < 0 || (uint64_t)offset != r->ifcall.tread.offset) {
+        ixp_respond(r, strerror(EOVERFLOW));
         return;
     }
-    
-    buf = malloc(r->ifcall.tread.count);
-    if (!buf) {
-        close(fd);
+    buffer = s9_malloc(r->ifcall.tread.count ? r->ifcall.tread.count : 1);
+    if(!buffer) {
         ixp_respond(r, "out of memory");
         return;
     }
-    
-    /* Position file pointer at the requested offset */
-    off_t seek_result = lseek(fd, r->ifcall.tread.offset, SEEK_SET);
-    if (seek_result == (off_t)-1) {
-        free(buf);
-        close(fd);
-        ixp_respond(r, strerror(errno));
+    if(r->ifcall.tread.count == 0)
+        count = 0;
+    else if(lseek(state->fd, offset, SEEK_SET) < 0) {
+        int error = errno;
+        s9_free(buffer);
+        ixp_respond(r, strerror(error));
+        return;
+    } else
+        count = read(state->fd, buffer, r->ifcall.tread.count);
+    if(count < 0) {
+        int error = errno;
+        s9_free(buffer);
+        ixp_respond(r, strerror(error));
         return;
     }
-    
-    /* Read the requested data */
-    ssize_t n = read(fd, buf, r->ifcall.tread.count);
-    close(fd);
-    
-    if (n < 0) {
-        free(buf);
-        ixp_respond(r, strerror(errno));
-        return;
-    }
-    
-    r->ofcall.rread.count = n;
-    r->ofcall.rread.data = buf;
+    r->ofcall.rread.count = (uint32_t)count;
+    r->ofcall.rread.data = buffer;
     ixp_respond(r, nil);
-    /* buf is now owned by libixp */
 }

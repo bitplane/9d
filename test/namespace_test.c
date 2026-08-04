@@ -13,6 +13,15 @@ int platform_namespace_init(Namespace *ns) {
     return namespace_use_native(ns, "/");
 }
 
+int platform_namespace_ready(Namespace *ns) {
+    (void)ns;
+    return 0;
+}
+
+void platform_namespace_cleanup(Namespace *ns) {
+    (void)ns;
+}
+
 static void test_native_namespace(const char *root) {
     ResolvedPath resolved;
     char parent[PATH_MAX];
@@ -63,10 +72,10 @@ static void test_synthetic_namespace(const char *first, const char *second) {
     assert(namespace_is_protected("/Work") == 1);
     assert(namespace_is_protected("/Work/file") == 0);
 
-    assert(namespace_join_virtual(path, sizeof(path), "/Work", "..") == 0);
-    assert(strcmp(path, "/") == 0);
-    assert(namespace_join_virtual(path, sizeof(path), "/", "..") == 0);
-    assert(strcmp(path, "/") == 0);
+    assert(namespace_join_virtual(path, sizeof(path), "/Work", "..") == -1);
+    assert(namespace_join_virtual(path, sizeof(path), "/Work", ".") == -1);
+    assert(namespace_join_virtual(path, sizeof(path), "/Work", "") == -1);
+    assert(namespace_join_virtual(path, sizeof(path), "/Work", "a/b") == -1);
 
     assert(stat(first, &first_stat) == 0);
     assert(stat(second, &second_stat) == 0);

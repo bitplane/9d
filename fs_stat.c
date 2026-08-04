@@ -1,303 +1,429 @@
 #include "server.h"
+#include "platform.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h> // For truncate, chmod, readlink
-#include <errno.h>
-#include <limits.h> // For LONG_MAX
+#include <unistd.h>
+#include <utime.h>
 
-// build_stat populates an IxpStat structure from a file's stat data.
-// s: The IxpStat structure to populate.
-// path: The relative 9P path of the file.
-// fullpath: The absolute OS path of the file.
-// st: The struct stat obtained from lstat() on fullpath.
-void build_stat(IxpStat *s, const char *path, const char *fullpath,
-                const ResolvedPath *resolved, struct stat *st) {
-    // Initialize basic fields
-    s->type = 0; // Typically 0 for 9P2000
-    s->dev = 0;  // Typically 0 for 9P2000
+typedef struct RenameUpdate {
+    FidState *state;
+    char *path;
+    struct RenameUpdate *next;
+} RenameUpdate;
 
-    // Determine QID type
-    s->qid.type = P9_QTFILE; // Default to file
-    if (S_ISDIR(st->st_mode)) {
-        s->qid.type = P9_QTDIR;
-    } else if (S_ISLNK(st->st_mode)) {
-        s->qid.type = P9_QTSYMLINK;
-    }
+static char *number_string(uint32_t value) {
+    char buffer[32];
 
-    // QID path and version
-    s->qid.path = namespace_qid(resolved, st);
-    s->qid.version = st->st_mtime;  // Use modification time for version
-
-    // Mode: 9P permissions and directory/symlink flags
-    s->mode = st->st_mode & 0777; // Basic Unix permissions
-    if (S_ISDIR(st->st_mode)) {
-        s->mode |= P9_DMDIR;
-    } else if (S_ISLNK(st->st_mode)) {
-        s->mode |= P9_DMSYMLINK;
-    }
-    // Other types like P9_DMAPPEND, P9_DMEXCL, P9_DMAUTH could be set if applicable
-
-    // Timestamps
-    s->atime = st->st_atime;
-    s->mtime = st->st_mtime;
-
-    // Length and blocks - use exactly what the OS reports
-    s->length = st->st_size;
-    
-    // For symlinks, store target in extension field and set length
-    // For non-symlinks, extension must be empty string (not NULL) for 9P2000.u
-    if (S_ISLNK(st->st_mode)) {
-        char target_buf[PATH_MAX];
-        ssize_t len = readlink(fullpath, target_buf, sizeof(target_buf) - 1);
-        if (len != -1) {
-            target_buf[len] = '\0';
-            s->length = len;
-            s->extension = strdup(target_buf);
-        } else {
-            s->extension = strdup("");
-        }
-    } else {
-        s->extension = strdup("");
-    }
-
-    // 9P2000.u numeric IDs
-    s->n_uid = st->st_uid;
-    s->n_gid = st->st_gid;
-    s->n_muid = st->st_uid;
-
-    // Name: The last component of the path
-    // Handle root path specifically
-    if (strcmp(path, "/") == 0) {
-        s->name = strdup("/"); // Allocate a new copy to be consistent with other cases
-    } else {
-        s->name = strdup(path_basename(path));
-    }
-
-    // User and group names
-    // For simplicity, using environment USER or "none". 9P allows string UIDs.
-    const char *user = getenv("USER");
-    s->uid = user ? strdup(user) : strdup("none");
-    s->gid = strdup(s->uid);  // Same as uid
-    s->muid = strdup(s->uid); // Last modifier same as uid
+    snprintf(buffer, sizeof(buffer), "%u", value);
+    return s9_strdup(buffer);
 }
 
-void build_synthetic_stat(IxpStat *s, const char *name) {
+static char *read_link_for_stat(const ResolvedPath *path, size_t hint) {
+    size_t size = hint ? hint + 1 : 128;
+
+    for(;;) {
+        char *target = s9_malloc(size);
+        ssize_t length;
+
+        if(!target)
+            return NULL;
+        length = platform_readlink(path, target, size - 1);
+        if(length < 0) {
+            int error = errno;
+            s9_free(target);
+            errno = error;
+            return NULL;
+        }
+        if((size_t)length < size - 1) {
+            target[length] = '\0';
+            return target;
+        }
+        s9_free(target);
+        if(size > SIZE_MAX / 2)
+            return NULL;
+        size *= 2;
+    }
+}
+
+int build_stat(IxpStat *s, const char *path, const ResolvedPath *resolved,
+               const struct stat *st,
+               const char *symlink_target) {
+    memset(s, 0, sizeof(*s));
+    s->qid.type = S_ISDIR(st->st_mode) ? P9_QTDIR :
+                  S_ISLNK(st->st_mode) ? P9_QTSYMLINK : P9_QTFILE;
+    s->qid.path = namespace_qid(resolved, st);
+    s->qid.version = qid_version(s->qid.path, st);
+    s->mode = st->st_mode & 0777;
+    if(S_ISDIR(st->st_mode))
+        s->mode |= P9_DMDIR;
+    else if(S_ISLNK(st->st_mode))
+        s->mode |= P9_DMSYMLINK;
+    s->atime = (uint32_t)st->st_atime;
+    s->mtime = (uint32_t)st->st_mtime;
+    s->length = (uint64_t)st->st_size;
+    s->n_uid = (uint32_t)st->st_uid;
+    s->n_gid = (uint32_t)st->st_gid;
+    s->n_muid = (uint32_t)~0;
+    s->name = s9_strdup(strcmp(path, "/") == 0 ? "/" : path_basename(path));
+    s->uid = number_string(s->n_uid);
+    s->gid = number_string(s->n_gid);
+    s->muid = s9_strdup("");
+    if(S_ISLNK(st->st_mode)) {
+        s->extension = symlink_target ? s9_strdup(symlink_target)
+                                      : read_link_for_stat(resolved,
+                                                           (size_t)st->st_size);
+        if(s->extension)
+            s->length = strlen(s->extension);
+    } else
+        s->extension = s9_strdup("");
+    if(!s->name || !s->uid || !s->gid || !s->muid || !s->extension) {
+        int error = errno ? errno : ENOMEM;
+        free_stat_strings(s);
+        memset(s, 0, sizeof(*s));
+        errno = error;
+        return -1;
+    }
+    return 0;
+}
+
+int build_synthetic_stat(IxpStat *s, const char *name) {
     memset(s, 0, sizeof(*s));
     s->qid.type = P9_QTDIR;
     s->qid.path = namespace_root_qid();
     s->mode = P9_DMDIR | 0555;
-    s->name = strdup(name);
-    s->uid = strdup("none");
-    s->gid = strdup("none");
-    s->muid = strdup("none");
-    s->extension = strdup("");
+    s->name = s9_strdup(name);
+    s->uid = s9_strdup("none");
+    s->gid = s9_strdup("none");
+    s->muid = s9_strdup("");
+    s->extension = s9_strdup("");
     s->n_uid = (uint32_t)~0;
     s->n_gid = (uint32_t)~0;
     s->n_muid = (uint32_t)~0;
+    if(!s->name || !s->uid || !s->gid || !s->muid || !s->extension) {
+        free_stat_strings(s);
+        memset(s, 0, sizeof(*s));
+        errno = ENOMEM;
+        return -1;
+    }
+    return 0;
 }
 
-// Helper to free allocated strings in IxpStat
 void free_stat_strings(IxpStat *s) {
-    if (s->name) free((char*)s->name);
-    if (s->uid) free((char*)s->uid);
-    if (s->gid) free((char*)s->gid);
-    if (s->muid) free((char*)s->muid);
-    if (s->extension) free((char*)s->extension);
+    s9_free(s->name);
+    s9_free(s->uid);
+    s9_free(s->gid);
+    s9_free(s->muid);
+    s9_free(s->extension);
 }
 
-// fs_stat handles Tstat messages.
+static int state_stat(FidState *state, ResolvedPath *resolved,
+                      struct stat *st) {
+    if(namespace_resolve(state->path, resolved) < 0)
+        return -1;
+    if(resolved->synthetic) {
+        memset(st, 0, sizeof(*st));
+        st->st_mode = S_IFDIR | 0555;
+        return 0;
+    }
+    if(state->fd >= 0)
+        return fstat(state->fd, st);
+    if(state->dir)
+        return platform_lstat(resolved, st);
+    if(state->symlink && state->stat_valid) {
+        *st = state->opened_stat;
+        return 0;
+    }
+    return platform_lstat(resolved, st);
+}
+
 void fs_stat(Ixp9Req *r) {
     FidState *state = r->fid->aux;
     ResolvedPath resolved;
-    struct stat st_os; // OS stat structure
-    IxpStat s_ixp;     // 9P stat structure
-    IxpMsg m;
-    uint16_t size_of_ixp_stat;
+    struct stat st;
+    IxpStat stat;
+    IxpMsg message;
+    uint16_t size;
 
-    if (!state || !state->path) {
+    if(!state || !state->path) {
         ixp_respond(r, "invalid fid state");
         return;
     }
-
-    if (namespace_resolve(state->path, &resolved) < 0) {
+    if(state_stat(state, &resolved, &st) < 0) {
         ixp_respond(r, strerror(errno));
         return;
     }
-
-    if (!resolved.synthetic && lstat(resolved.native_path, &st_os) < 0) {
-        ixp_respond(r, strerror(errno));
-        return;
-    }
-
-    memset(&s_ixp, 0, sizeof(IxpStat)); // Zero out the structure
-    if(resolved.synthetic)
-        build_synthetic_stat(&s_ixp, "/");
-    else
-        build_stat(&s_ixp, state->path, resolved.native_path, &resolved,
-                   &st_os);
-
-    size_of_ixp_stat = ixp_sizeof_stat(&s_ixp, ixp_req_getversion(r));
-    r->ofcall.rstat.nstat = size_of_ixp_stat;
-    r->ofcall.rstat.stat = malloc(size_of_ixp_stat);
-
-    if (!r->ofcall.rstat.stat) {
-        free_stat_strings(&s_ixp);
+    if(resolved.synthetic) {
+        if(build_synthetic_stat(&stat, "/") < 0) {
+            ixp_respond(r, "out of memory");
+            return;
+        }
+    } else if(build_stat(&stat, state->path, &resolved, &st,
+                         state->symlink) < 0) {
         ixp_respond(r, "out of memory");
         return;
     }
-
-    m = ixp_message((char *)r->ofcall.rstat.stat, size_of_ixp_stat, MsgPack);
-    m.version = ixp_req_getversion(r);
-    ixp_pstat(&m, &s_ixp);
-
-    // Free allocated strings after packing
-    free_stat_strings(&s_ixp);
-
+    size = ixp_sizeof_stat(&stat, ixp_req_getversion(r));
+    r->ofcall.rstat.nstat = size;
+    r->ofcall.rstat.stat = s9_malloc(size);
+    if(!r->ofcall.rstat.stat) {
+        free_stat_strings(&stat);
+        ixp_respond(r, "out of memory");
+        return;
+    }
+    message = ixp_message((char *)r->ofcall.rstat.stat, size, MsgPack);
+    message.version = ixp_req_getversion(r);
+    ixp_pstat(&message, &stat);
+    free_stat_strings(&stat);
     ixp_respond(r, nil);
-    // r->ofcall.rstat.stat is now owned by libixp and will be freed by it.
 }
 
-// fs_wstat handles Twstat messages.
+static int path_is_at_or_below(const char *path, const char *parent) {
+    size_t length = strlen(parent);
+
+    return strcmp(path, parent) == 0 ||
+           (strncmp(path, parent, length) == 0 && path[length] == '/');
+}
+
+static void free_updates(RenameUpdate *updates) {
+    while(updates) {
+        RenameUpdate *next = updates->next;
+        s9_free(updates->path);
+        s9_free(updates);
+        updates = next;
+    }
+}
+
+static RenameUpdate *prepare_updates(const char *old_path,
+                                     const char *new_path) {
+    FidState *state;
+    RenameUpdate *updates = NULL;
+    size_t old_length = strlen(old_path);
+
+    for(state = simple9p.fids; state; state = state->next) {
+        RenameUpdate *update;
+        const char *suffix;
+        size_t new_length;
+        size_t suffix_length;
+        size_t length;
+
+        if(!path_is_at_or_below(state->path, old_path))
+            continue;
+        suffix = state->path + old_length;
+        new_length = strlen(new_path);
+        suffix_length = strlen(suffix);
+        if(new_length > SIZE_MAX - suffix_length - 1) {
+            errno = ENAMETOOLONG;
+            free_updates(updates);
+            return NULL;
+        }
+        length = new_length + suffix_length + 1;
+        update = s9_malloc(sizeof(*update));
+        if(!update) {
+            free_updates(updates);
+            return NULL;
+        }
+        update->path = s9_malloc(length);
+        if(!update->path) {
+            s9_free(update);
+            free_updates(updates);
+            return NULL;
+        }
+        snprintf(update->path, length, "%s%s", new_path, suffix);
+        update->state = state;
+        update->next = updates;
+        updates = update;
+    }
+    return updates;
+}
+
+#ifdef SIMPLE9P_TESTING
+int test_prepare_rename_updates(const char *old_path, const char *new_path) {
+    RenameUpdate *updates = prepare_updates(old_path, new_path);
+
+    if(!updates)
+        return -1;
+    free_updates(updates);
+    return 0;
+}
+#endif
+
+static void commit_updates(RenameUpdate *updates) {
+    while(updates) {
+        RenameUpdate *next = updates->next;
+        char *old_path = updates->state->path;
+        updates->state->path = updates->path;
+        updates->path = NULL;
+        s9_free(old_path);
+        s9_free(updates);
+        updates = next;
+    }
+}
+
+static int ownership_requested(const IxpStat *stat) {
+    return (stat->uid && stat->uid[0]) || (stat->gid && stat->gid[0]) ||
+           (stat->muid && stat->muid[0]) || stat->n_uid != (uint32_t)~0 ||
+           stat->n_gid != (uint32_t)~0 || stat->n_muid != (uint32_t)~0;
+}
+
 void fs_wstat(Ixp9Req *r) {
     FidState *state = r->fid->aux;
+    IxpStat *requested = &r->ifcall.twstat.stat;
     ResolvedPath resolved;
-    IxpStat *s_new = &r->ifcall.twstat.stat; // The new stat data from client
-    struct stat current_st_os;               // Current OS attributes of the file
-    int respond_early = 0;
-    char *original_fid_path_on_success_rename = NULL;
+    struct stat original;
+    int change_name;
+    int change_length = requested->length != UINT64_MAX;
+    int change_mode = requested->mode != UINT32_MAX;
+    int change_atime = requested->atime != UINT32_MAX;
+    int change_mtime = requested->mtime != UINT32_MAX;
 
-    if (debug) {
-        fprintf(stderr, "fs_wstat: path=%s, length=%llu (mask=%llu)\n", 
-                state ? state->path : "NULL", 
-                (unsigned long long)s_new->length, 
-                (unsigned long long)~0ULL);
-    }
-
-    if (!state || !state->path) {
+    if(!state || !state->path) {
         ixp_respond(r, "invalid fid state");
         return;
     }
-
+    change_name = requested->name && requested->name[0] &&
+                  strcmp(requested->name, path_basename(state->path)) != 0;
     if(namespace_is_protected(state->path)) {
         ixp_respond(r, strerror(EPERM));
         return;
     }
-    if (namespace_resolve(state->path, &resolved) < 0) {
+    if((requested->uid && requested->uid[0]) ||
+       (requested->gid && requested->gid[0]) ||
+       (requested->muid && requested->muid[0]) ||
+       (ixp_req_getversion(r) == IXP_V9P2000U &&
+        ownership_requested(requested))) {
+        ixp_respond(r, strerror(EOPNOTSUPP));
+        return;
+    }
+    if(change_name && (change_length || change_mode || change_atime ||
+                       change_mtime)) {
+        ixp_respond(r, strerror(EINVAL));
+        return;
+    }
+    if(change_name && !namespace_valid_component(requested->name)) {
+        ixp_respond(r, strerror(EINVAL));
+        return;
+    }
+    if(namespace_resolve(state->path, &resolved) < 0 ||
+       state_stat(state, &resolved, &original) < 0) {
         ixp_respond(r, strerror(errno));
         return;
     }
-
-    if (lstat(resolved.native_path, &current_st_os) < 0) {
-        ixp_respond(r, strerror(errno));
-        return;
-    }
-
-    // Handle length change (truncate)
-    // This is a special case that's particularly important to handle correctly
-    // The FUSE protocol uses ~0ULL as a "don't change" marker for the length field
-    if (s_new->length != (uint64_t)~0ULL) {
-        if (debug) {
-            fprintf(stderr, "fs_wstat: truncating file to %llu (current %llu)\n", 
-                    (unsigned long long)s_new->length, 
-                    (unsigned long long)current_st_os.st_size);
+    if(change_mode) {
+        uint32_t allowed_type = S_ISDIR(original.st_mode) ? P9_DMDIR :
+                                S_ISLNK(original.st_mode) ? P9_DMSYMLINK : 0;
+        if((requested->mode & ~0777U) != allowed_type) {
+            ixp_respond(r, strerror(EOPNOTSUPP));
+            return;
         }
-        
-        if (S_ISDIR(current_st_os.st_mode)) {
-            // Can't truncate a directory
+    }
+    if(change_length) {
+        off_t length = (off_t)requested->length;
+        if(S_ISDIR(original.st_mode)) {
             ixp_respond(r, strerror(EISDIR));
-            respond_early = 1;
-        } else {
-            // For regular files, perform the truncate
-            // First check if we actually need to truncate (optimization)
-            if (s_new->length != (uint64_t)current_st_os.st_size) {
-                // Validate the truncate length is reasonable
-                if (s_new->length > (uint64_t)LONG_MAX) {
-                    // Most filesystem APIs can't handle sizes larger than LONG_MAX
-                    ixp_respond(r, strerror(EFBIG));
-                    respond_early = 1;
-                } else {
-                    if (truncate(resolved.native_path, (off_t)s_new->length) < 0) {
-                        ixp_respond(r, strerror(errno));
-                        respond_early = 1;
-                    }
-                }
-            }
+            return;
+        }
+        if(length < 0 || (uint64_t)length != requested->length) {
+            ixp_respond(r, strerror(EFBIG));
+            return;
         }
     }
 
-    if (respond_early)
-        return;
+    if(change_name) {
+        const char *slash = strrchr(state->path, '/');
+        size_t parent_length = slash == state->path ? 1 :
+                               (size_t)(slash - state->path);
+        char *parent = s9_malloc(parent_length + 1);
+        char *new_path;
+        ResolvedPath renamed;
+        RenameUpdate *updates;
 
-    // Handle mode changes (chmod)
-    // P9_BIT32_MASK (~0U) is the "don't change" marker for uint32_t fields.
-    if (s_new->mode != (uint32_t)~0) {
-        mode_t requested_perms = s_new->mode & 0777; // Apply only permission bits
-        if (requested_perms != (current_st_os.st_mode & 0777)) {
-            if (chmod(resolved.native_path, requested_perms) < 0) {
-                ixp_respond(r, strerror(errno));
-                respond_early = 1;
-            }
+        if(!parent) {
+            ixp_respond(r, "out of memory");
+            return;
+        }
+        memcpy(parent, state->path, parent_length);
+        parent[parent_length] = '\0';
+        new_path = namespace_join_virtual_alloc(parent, requested->name);
+        s9_free(parent);
+        if(!new_path || namespace_resolve(new_path, &renamed) < 0) {
+            int error = errno;
+            s9_free(new_path);
+            ixp_respond(r, strerror(error));
+            return;
+        }
+        updates = prepare_updates(state->path, new_path);
+        if(!updates) {
+            s9_free(new_path);
+            ixp_respond(r, "out of memory");
+            return;
+        }
+        if(qid_prepare(r->fid->qid.path) < 0) {
+            free_updates(updates);
+            s9_free(new_path);
+            ixp_respond(r, "out of memory");
+            return;
+        }
+        if(platform_rename(&resolved, &renamed) < 0) {
+            int error = errno;
+            free_updates(updates);
+            s9_free(new_path);
+            ixp_respond(r, strerror(error));
+            return;
+        }
+        commit_updates(updates);
+        s9_free(new_path);
+        qid_bump(r->fid->qid.path);
+        ixp_respond(r, nil);
+        return;
+    }
+
+    if((change_mode || change_atime || change_mtime || change_length) &&
+       qid_prepare(r->fid->qid.path) < 0) {
+        ixp_respond(r, "out of memory");
+        return;
+    }
+
+    if(change_mode) {
+        int result = state->fd >= 0 ? fchmod(state->fd,
+                                             requested->mode & 0777)
+                                    : platform_chmod(&resolved,
+                                                     requested->mode & 0777);
+        if(result < 0) {
+            ixp_respond(r, strerror(errno));
+            return;
         }
     }
-
-    if (respond_early)
-        return;
-
-    // Handle name changes (rename)
-    // s_new->name being NULL or empty means "don't change name".
-    if (s_new->name != NULL && s_new->name[0] != '\0') {
-        const char *current_basename = path_basename(state->path);
-
-            // Check if the new name is actually different from the current one.
-            if (strcmp(current_basename, s_new->name) != 0) {
-                char new_relative_path[PATH_MAX];
-                char new_absolute_fullpath[PATH_MAX];
-                char parent[PATH_MAX];
-
-                if(path_parent(state->path, parent, sizeof(parent)) < 0) {
-                    ixp_respond(r, "path too long for wstat rename");
-                    respond_early = 1;
-                } else if(namespace_join_virtual(
-                              new_relative_path, sizeof(new_relative_path),
-                              parent, s_new->name) < 0) {
-                    ixp_respond(r, "invalid name for wstat rename");
-                    respond_early = 1;
-                } else {
-                    ResolvedPath renamed;
-                    if (namespace_resolve(new_relative_path, &renamed) < 0) {
-                        ixp_respond(r, strerror(errno));
-                        respond_early = 1;
-                    } else {
-                        strcpy(new_absolute_fullpath, renamed.native_path);
-                        if (rename(resolved.native_path, new_absolute_fullpath) < 0) {
-                            ixp_respond(r, strerror(errno));
-                            respond_early = 1;
-                        } else {
-                            original_fid_path_on_success_rename = state->path; // Keep old path pointer
-                            state->path = strdup(new_relative_path);
-                            if (!state->path) {
-                                // Critical: OS rename succeeded, but server state update failed.
-                                // Try to restore old path to prevent FID from being totally broken.
-                                state->path = original_fid_path_on_success_rename;
-                                original_fid_path_on_success_rename = NULL; // Don't free it below
-                                ixp_respond(r, "out of memory after rename, server state inconsistent");
-                                respond_early = 1;
-                                // Consider logging this critical failure.
-                            } else {
-                                free(original_fid_path_on_success_rename); // Free the old path string
-                            }
-                        }
-                    }
-                }
-            }
+    if(change_length) {
+        off_t length = (off_t)requested->length;
+        int result = state->fd >= 0 ? ftruncate(state->fd, length)
+                                    : platform_truncate(&resolved, length);
+        if(result < 0) {
+            int error = errno;
+            if(change_mode)
+                platform_chmod(&resolved, original.st_mode & 0777);
+            ixp_respond(r, strerror(error));
+            return;
+        }
     }
-
-    if (respond_early)
-        return;
-
-    // Other wstat operations (e.g., mtime, uid, gid) are not implemented.
-    // Client would set s_new->mtime, s_new->uid, etc. to non-"don't change" values.
-
+    if(change_atime || change_mtime) {
+        time_t atime = change_atime ? requested->atime : original.st_atime;
+        time_t mtime = change_mtime ? requested->mtime : original.st_mtime;
+        if(platform_set_times(&resolved, atime, mtime) < 0) {
+            int error = errno;
+            if(change_mode)
+                platform_chmod(&resolved, original.st_mode & 0777);
+            ixp_respond(r, strerror(error));
+            return;
+        }
+    }
+    if(change_mode || change_atime || change_mtime || change_length)
+        qid_bump(r->fid->qid.path);
+    if(state->stat_valid && platform_lstat(&resolved, &state->opened_stat) < 0)
+        state->stat_valid = 0;
     ixp_respond(r, nil);
 }

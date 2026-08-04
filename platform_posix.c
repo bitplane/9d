@@ -1,4 +1,327 @@
-#include "namespace.h"
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE
+#endif
+
+#include "platform.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static int native_root = -1;
+static int *synthetic_roots;
+static size_t synthetic_root_count;
+
+void platform_namespace_cleanup(Namespace *ns) {
+    size_t index;
+
+    (void)ns;
+    if(native_root >= 0) {
+        close(native_root);
+        native_root = -1;
+    }
+    for(index = 0; index < synthetic_root_count; index++) {
+        if(synthetic_roots[index] >= 0)
+            close(synthetic_roots[index]);
+    }
+    free(synthetic_roots);
+    synthetic_roots = NULL;
+    synthetic_root_count = 0;
+}
+
+int platform_namespace_ready(Namespace *ns) {
+    size_t index;
+
+    platform_namespace_cleanup(ns);
+    if(!ns->synthetic) {
+        native_root = open(ns->native_root,
+                           O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        return native_root < 0 ? -1 : 0;
+    }
+    if(!ns->nroots)
+        return 0;
+    synthetic_roots = malloc(ns->nroots * sizeof(*synthetic_roots));
+    if(!synthetic_roots) {
+        errno = ENOMEM;
+        return -1;
+    }
+    synthetic_root_count = ns->nroots;
+    for(index = 0; index < synthetic_root_count; index++)
+        synthetic_roots[index] = -1;
+    for(index = 0; index < ns->nroots; index++) {
+        synthetic_roots[index] = open(ns->roots[index].path,
+                                      O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if(synthetic_roots[index] < 0) {
+            int error = errno;
+            platform_namespace_cleanup(ns);
+            errno = error;
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int root_descriptor(const ResolvedPath *path) {
+    int root = namespace.synthetic ? synthetic_roots[path->root_index]
+                                   : native_root;
+    int descriptor = dup(root);
+
+    if(descriptor >= 0)
+        fcntl(descriptor, F_SETFD, FD_CLOEXEC);
+    return descriptor;
+}
+
+static int open_parent(const ResolvedPath *path, char *leaf,
+                       size_t leaf_size) {
+    char relative[PATH_MAX];
+    char *component;
+    char *next;
+    int directory;
+
+    directory = root_descriptor(path);
+    if(directory < 0)
+        return -1;
+    if(!path->relative_path[0]) {
+        if(leaf_size < 2) {
+            close(directory);
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        strcpy(leaf, ".");
+        return directory;
+    }
+    if(strlen(path->relative_path) >= sizeof(relative)) {
+        close(directory);
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    strcpy(relative, path->relative_path);
+    component = relative;
+    for(;;) {
+        int child;
+
+        next = strchr(component, '/');
+        if(!next)
+            break;
+        *next = '\0';
+        child = openat(directory, component,
+                       O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if(child < 0) {
+            int error = errno;
+            close(directory);
+            errno = error;
+            return -1;
+        }
+        close(directory);
+        directory = child;
+        component = next + 1;
+    }
+    if(strlen(component) >= leaf_size) {
+        close(directory);
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    strcpy(leaf, component);
+    return directory;
+}
+
+int platform_lstat(const ResolvedPath *path, struct stat *st) {
+    char leaf[PATH_MAX];
+    int parent = open_parent(path, leaf, sizeof(leaf));
+    int result;
+    int error;
+
+    if(parent < 0)
+        return -1;
+    result = fstatat(parent, leaf, st, AT_SYMLINK_NOFOLLOW);
+    error = errno;
+    close(parent);
+    errno = error;
+    return result;
+}
+
+int platform_open(const ResolvedPath *path, int flags, mode_t mode) {
+    char leaf[PATH_MAX];
+    int parent = open_parent(path, leaf, sizeof(leaf));
+    int descriptor;
+    int error;
+
+    if(parent < 0)
+        return -1;
+    descriptor = openat(parent, leaf, flags | O_NOFOLLOW | O_CLOEXEC, mode);
+    error = errno;
+    close(parent);
+    errno = error;
+    return descriptor;
+}
+
+DIR *platform_opendir(const ResolvedPath *path) {
+    int descriptor = platform_open(path, O_RDONLY | O_DIRECTORY, 0);
+    DIR *directory;
+
+    if(descriptor < 0)
+        return NULL;
+    directory = fdopendir(descriptor);
+    if(!directory) {
+        int error = errno;
+        close(descriptor);
+        errno = error;
+    }
+    return directory;
+}
+
+ssize_t platform_readlink(const ResolvedPath *path, char *buffer, size_t size) {
+    char leaf[PATH_MAX];
+    int parent = open_parent(path, leaf, sizeof(leaf));
+    ssize_t result;
+    int error;
+
+    if(parent < 0)
+        return -1;
+    result = readlinkat(parent, leaf, buffer, size);
+    error = errno;
+    close(parent);
+    errno = error;
+    return result;
+}
+
+int platform_access_execute(const ResolvedPath *path) {
+    char leaf[PATH_MAX];
+    int parent = open_parent(path, leaf, sizeof(leaf));
+    int result;
+    int error;
+
+    if(parent < 0)
+        return -1;
+    result = faccessat(parent, leaf, X_OK, 0);
+    error = errno;
+    close(parent);
+    errno = error;
+    return result;
+}
+
+int platform_mkdir(const ResolvedPath *path, mode_t mode) {
+    char leaf[PATH_MAX];
+    int parent = open_parent(path, leaf, sizeof(leaf));
+    int result;
+    int error;
+
+    if(parent < 0)
+        return -1;
+    result = mkdirat(parent, leaf, mode);
+    error = errno;
+    close(parent);
+    errno = error;
+    return result;
+}
+
+int platform_symlink(const char *target, const ResolvedPath *path) {
+    char leaf[PATH_MAX];
+    int parent = open_parent(path, leaf, sizeof(leaf));
+    int result;
+    int error;
+
+    if(parent < 0)
+        return -1;
+    result = symlinkat(target, parent, leaf);
+    error = errno;
+    close(parent);
+    errno = error;
+    return result;
+}
+
+int platform_remove(const ResolvedPath *path, int directory) {
+    char leaf[PATH_MAX];
+    int parent = open_parent(path, leaf, sizeof(leaf));
+    int result;
+    int error;
+
+    if(parent < 0)
+        return -1;
+    result = unlinkat(parent, leaf, directory ? AT_REMOVEDIR : 0);
+    error = errno;
+    close(parent);
+    errno = error;
+    return result;
+}
+
+int platform_rename(const ResolvedPath *old_path,
+                    const ResolvedPath *new_path) {
+    char old_leaf[PATH_MAX];
+    char new_leaf[PATH_MAX];
+    int old_parent = open_parent(old_path, old_leaf, sizeof(old_leaf));
+    int new_parent;
+    int result;
+    int error;
+
+    if(old_parent < 0)
+        return -1;
+    new_parent = open_parent(new_path, new_leaf, sizeof(new_leaf));
+    if(new_parent < 0) {
+        error = errno;
+        close(old_parent);
+        errno = error;
+        return -1;
+    }
+    result = renameat(old_parent, old_leaf, new_parent, new_leaf);
+    error = errno;
+    close(old_parent);
+    close(new_parent);
+    errno = error;
+    return result;
+}
+
+int platform_chmod(const ResolvedPath *path, mode_t mode) {
+    char leaf[PATH_MAX];
+    int parent = open_parent(path, leaf, sizeof(leaf));
+    int result;
+    int error;
+
+    if(parent < 0)
+        return -1;
+    result = fchmodat(parent, leaf, mode, AT_SYMLINK_NOFOLLOW);
+    error = errno;
+    close(parent);
+    errno = error;
+    return result;
+}
+
+int platform_set_times(const ResolvedPath *path, time_t atime, time_t mtime) {
+    char leaf[PATH_MAX];
+    struct timespec times[2];
+    int parent = open_parent(path, leaf, sizeof(leaf));
+    int result;
+    int error;
+
+    if(parent < 0)
+        return -1;
+    times[0].tv_sec = atime;
+    times[0].tv_nsec = 0;
+    times[1].tv_sec = mtime;
+    times[1].tv_nsec = 0;
+    result = utimensat(parent, leaf, times, AT_SYMLINK_NOFOLLOW);
+    error = errno;
+    close(parent);
+    errno = error;
+    return result;
+}
+
+int platform_truncate(const ResolvedPath *path, off_t length) {
+    int descriptor = platform_open(path, O_WRONLY, 0);
+    int result;
+    int error;
+
+    if(descriptor < 0)
+        return -1;
+    result = ftruncate(descriptor, length);
+    error = errno;
+    close(descriptor);
+    errno = error;
+    return result;
+}
 
 int platform_namespace_init(Namespace *ns) {
     return namespace_use_native(ns, "/");

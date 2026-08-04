@@ -1,167 +1,177 @@
 #include "server.h"
-#include <stdio.h>
+#include "platform.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
 
-// fs_read handles Tread Fcall messages.
-// It determines if the path is a directory, symlink, or regular file
-// and calls the appropriate read function.
+static int checked_offset(uint64_t value, off_t *offset) {
+    off_t converted = (off_t)value;
+
+    if(converted < 0 || (uint64_t)converted != value) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    *offset = converted;
+    return 0;
+}
+
+static int open_flags(uint8_t mode, int *flags) {
+    uint8_t access = mode & 3;
+
+    if(mode & ~(3 | P9_OTRUNC | P9_ORCLOSE)) {
+        errno = EOPNOTSUPP;
+        return -1;
+    }
+    if((mode & P9_OTRUNC) &&
+       (access == P9_OREAD || access == P9_OEXEC)) {
+        errno = EACCES;
+        return -1;
+    }
+
+    switch(access) {
+    case P9_OREAD:
+        *flags = O_RDONLY;
+        break;
+    case P9_OWRITE:
+        *flags = O_WRONLY;
+        break;
+    case P9_ORDWR:
+        *flags = O_RDWR;
+        break;
+    case P9_OEXEC:
+        *flags = O_RDONLY;
+        break;
+    default:
+        errno = EINVAL;
+        return -1;
+    }
+    if(mode & P9_OTRUNC)
+        *flags |= O_TRUNC;
+    if(mode & P9_OAPPEND)
+        *flags |= O_APPEND;
+    return 0;
+}
+
+static char *read_link_target(const ResolvedPath *path, size_t hint,
+                              size_t *length) {
+    size_t size = hint ? hint + 1 : 128;
+
+    for(;;) {
+        char *target;
+        ssize_t count;
+
+        if(size > SIZE_MAX / 2) {
+            errno = ENAMETOOLONG;
+            return NULL;
+        }
+        target = s9_malloc(size);
+        if(!target) {
+            errno = ENOMEM;
+            return NULL;
+        }
+        count = platform_readlink(path, target, size);
+        if(count < 0) {
+            int error = errno;
+            s9_free(target);
+            errno = error;
+            return NULL;
+        }
+        if((size_t)count < size) {
+            *length = (size_t)count;
+            return target;
+        }
+        s9_free(target);
+        size *= 2;
+    }
+}
+
 void fs_read(Ixp9Req *r) {
     FidState *state = r->fid->aux;
-    ResolvedPath resolved;
-    struct stat st;
 
-    if (!state || !state->path) { // Ensure FidState and path are valid
+    if(!state || !state->path) {
         ixp_respond(r, "invalid fid state for read");
         return;
     }
-
-    if (namespace_resolve(state->path, &resolved) < 0) {
-        ixp_respond(r, strerror(errno));
-        return;
-    }
-
-    if(resolved.synthetic) {
-        read_synthetic_directory(r);
-        return;
-    }
-
-    // Use lstat to get information about the file/symlink itself
-    if (lstat(resolved.native_path, &st) < 0) {
-        ixp_respond(r, strerror(errno));
-        return;
-    }
-
-    // Dispatch based on the type of file system object
-    if (S_ISDIR(st.st_mode)) {
-        read_directory(r, state->path, &resolved);
-    } else if (S_ISLNK(st.st_mode)) {
-        read_symlink(r, resolved.native_path);
-    } else if (S_ISREG(st.st_mode)) {
-        read_file(r, resolved.native_path);
-    } else {
-        // Not a directory, symlink, or regular file that we can read
-        ixp_respond(r, strerror(EACCES)); // Or some other appropriate error
-    }
+    if(state->dir)
+        read_directory(r, state);
+    else if(state->symlink)
+        read_symlink(r, state);
+    else if(state->fd >= 0)
+        read_file(r, state);
+    else if(namespace_is_protected(state->path))
+        read_synthetic_directory(r, state);
+    else
+        ixp_respond(r, strerror(EBADF));
 }
 
-// fs_write handles Twrite Fcall messages.
 void fs_write(Ixp9Req *r) {
     FidState *state = r->fid->aux;
-    ResolvedPath resolved;
-    int fd;
-    int write_os_flags;
+    off_t offset;
+    ssize_t count;
 
-    if (!state || !state->path) {
-        ixp_respond(r, "invalid fid state for write");
+    if(!state || state->fd < 0) {
+        ixp_respond(r, strerror(EBADF));
         return;
     }
-
-    if(namespace_is_protected(state->path)) {
-        ixp_respond(r, strerror(EPERM));
+    if(!(state->open_flags & (O_WRONLY | O_RDWR))) {
+        ixp_respond(r, strerror(EBADF));
         return;
     }
-    if (namespace_resolve(state->path, &resolved) < 0) {
-        ixp_respond(r, strerror(errno));
+    if(r->ifcall.twrite.count == 0) {
+        r->ofcall.rwrite.count = 0;
+        ixp_respond(r, nil);
         return;
     }
-
-    // Check if the FID was opened with write permissions.
-    if (!(state->open_flags & (O_WRONLY | O_RDWR))) {
-        ixp_respond(r, strerror(EBADF)); // FID not opened for writing
-        return;
-    }
-    
-    // Determine the flags to use for opening the file
-    // First, handle the base access mode (O_RDWR or O_WRONLY)
-    if (state->open_flags & O_RDWR) {
-        write_os_flags = O_RDWR;
+    if(state->open_flags & O_APPEND) {
+        if(qid_prepare(r->fid->qid.path) < 0) {
+            ixp_respond(r, "out of memory");
+            return;
+        }
+        count = write(state->fd, r->ifcall.twrite.data,
+                      r->ifcall.twrite.count);
     } else {
-        write_os_flags = O_WRONLY;
-    }
-    
-    // Handle append mode specifically
-    int is_append = (state->open_flags & O_APPEND);
-    if (is_append) {
-        write_os_flags |= O_APPEND;
-    }
-    
-    // Add O_CREAT for file creation if needed
-    write_os_flags |= O_CREAT;
-    
-    // Handle truncation - if the offset is 0 and it's not append mode, 
-    // and this is a fresh write, we might want to truncate
-    if (r->ifcall.twrite.offset == 0 && !is_append && (state->open_flags & O_TRUNC)) {
-        write_os_flags |= O_TRUNC;
-    }
-
-    // Debug print 
-    if (debug) {
-        fprintf(stderr, "fs_write: path=%s flags=%x append=%d offset=%lu count=%u\n", 
-                resolved.native_path, write_os_flags, is_append,
-                (unsigned long)r->ifcall.twrite.offset,
-                r->ifcall.twrite.count);
-    }
-    
-    // Open the file with the determined flags - ensure it has appropriate permissions
-    fd = open(resolved.native_path, write_os_flags, 0666);
-    if (fd < 0) {
-        ixp_respond(r, strerror(errno));
-        return;
-    }
-
-    ssize_t n;
-    
-    if (is_append) {
-        // For O_APPEND, we don't need to seek as the kernel will automatically
-        // write at the end of the file. The offset from the 9P request is ignored.
-        n = write(fd, r->ifcall.twrite.data, r->ifcall.twrite.count);
-    } else {
-        // If not in append mode, seek to the requested offset
-        if (lseek(fd, r->ifcall.twrite.offset, SEEK_SET) < 0) {
-            close(fd);
+        if(checked_offset(r->ifcall.twrite.offset, &offset) < 0 ||
+           lseek(state->fd, offset, SEEK_SET) < 0) {
             ixp_respond(r, strerror(errno));
             return;
         }
-        
-        // Write the data at the specified offset
-        n = write(fd, r->ifcall.twrite.data, r->ifcall.twrite.count);
+        if(qid_prepare(r->fid->qid.path) < 0) {
+            ixp_respond(r, "out of memory");
+            return;
+        }
+        count = write(state->fd, r->ifcall.twrite.data,
+                      r->ifcall.twrite.count);
     }
-    
-    close(fd);
-
-    if (n < 0) {
+    if(count < 0) {
         ixp_respond(r, strerror(errno));
         return;
     }
-
-    r->ofcall.rwrite.count = n;
+    r->ofcall.rwrite.count = (uint32_t)count;
+    qid_bump(r->fid->qid.path);
     ixp_respond(r, nil);
 }
 
-// fs_open handles Topen Fcall messages.
 void fs_open(Ixp9Req *r) {
     FidState *state = r->fid->aux;
     ResolvedPath resolved;
     struct stat st;
-    int flags = 0;
-    
-    if (!state) {
+    int flags;
+
+    if(!state || !state->path) {
         ixp_respond(r, "invalid fid state");
         return;
     }
-    
-    if (namespace_resolve(state->path, &resolved) < 0) {
+    if(open_flags(r->ifcall.topen.mode, &flags) < 0) {
         ixp_respond(r, strerror(errno));
         return;
     }
-    if(namespace_is_protected(state->path) &&
-       ((r->ifcall.topen.mode & 3) != P9_OREAD ||
-        (r->ifcall.topen.mode & P9_OTRUNC))) {
-        ixp_respond(r, strerror(EPERM));
+    if(namespace_resolve(state->path, &resolved) < 0 ||
+       (!resolved.synthetic && platform_lstat(&resolved, &st) < 0)) {
+        ixp_respond(r, strerror(errno));
         return;
     }
     if(resolved.synthetic) {
@@ -172,215 +182,213 @@ void fs_open(Ixp9Req *r) {
         }
         memset(&st, 0, sizeof(st));
         st.st_mode = S_IFDIR | 0555;
-    } else if (lstat(resolved.native_path, &st) < 0) {
+    } else if(namespace_is_protected(state->path) &&
+              ((r->ifcall.topen.mode & 3) != P9_OREAD ||
+               (r->ifcall.topen.mode & P9_OTRUNC))) {
+        ixp_respond(r, strerror(EPERM));
+        return;
+    } else if((r->ifcall.topen.mode & 3) == P9_OEXEC &&
+              platform_access_execute(&resolved) < 0) {
         ixp_respond(r, strerror(errno));
         return;
     }
-    
-    /* Convert 9P open mode to Unix flags */
-    switch (r->ifcall.topen.mode & 3) {
-        case P9_OREAD:
-            flags = O_RDONLY;
-            break;
-        case P9_OWRITE:
-            flags = O_WRONLY;
-            break;
-        case P9_ORDWR:
-            flags = O_RDWR;
-            break;
-    }
-    
-    if (r->ifcall.topen.mode & P9_OTRUNC)
-        flags |= O_TRUNC;
-    if (r->ifcall.topen.mode & P9_OAPPEND)
-        flags |= O_APPEND;
-    
-    /* Store the mode and flags for later use */
-    state->open_mode = r->ifcall.topen.mode;
-    state->open_flags = flags;
-    
-    /* Test if we can actually open the file with these flags */
-    if (!S_ISDIR(st.st_mode)) {
-        int fd = open(resolved.native_path, flags);
-        if (fd < 0) {
+
+    fid_state_close(state);
+    if(resolved.synthetic) {
+        /* The synthetic namespace is enumerated from its immutable root list. */
+    } else if(S_ISDIR(st.st_mode)) {
+        state->dir = platform_opendir(&resolved);
+        if(!state->dir) {
             ixp_respond(r, strerror(errno));
             return;
         }
-        close(fd);
+    } else if(S_ISLNK(st.st_mode)) {
+        if((r->ifcall.topen.mode & 3) != P9_OREAD) {
+            ixp_respond(r, strerror(EACCES));
+            return;
+        }
+        state->symlink = read_link_target(&resolved,
+                                          (size_t)st.st_size,
+                                          &state->symlink_length);
+        if(!state->symlink) {
+            ixp_respond(r, strerror(errno));
+            return;
+        }
+    } else if(S_ISREG(st.st_mode)) {
+        state->fd = platform_open(&resolved, flags, 0);
+        if(state->fd < 0) {
+            ixp_respond(r, strerror(errno));
+            return;
+        }
+    } else {
+        ixp_respond(r, strerror(EOPNOTSUPP));
+        return;
     }
-    
-    r->fid->qid.type = P9_QTFILE;
-    if (S_ISDIR(st.st_mode))
-        r->fid->qid.type = P9_QTDIR;
-    else if (S_ISLNK(st.st_mode))
-        r->fid->qid.type = P9_QTSYMLINK;
-    
-    r->fid->qid.path = namespace_qid(&resolved, &st);
-    if(resolved.synthetic)
-        r->fid->qid.path = namespace_root_qid();
-    r->fid->qid.version = st.st_mtime;
+
+    state->open_mode = r->ifcall.topen.mode;
+    state->open_flags = flags;
+    state->remove_on_close = !!(r->ifcall.topen.mode & P9_ORCLOSE);
+    state->opened_stat = st;
+    state->stat_valid = 1;
+    r->fid->qid.type = S_ISDIR(st.st_mode) ? P9_QTDIR :
+                       S_ISLNK(st.st_mode) ? P9_QTSYMLINK : P9_QTFILE;
+    r->fid->qid.path = resolved.synthetic ? namespace_root_qid()
+                                           : namespace_qid(&resolved, &st);
+    r->fid->qid.version = qid_version(r->fid->qid.path, &st);
     r->ofcall.ropen.qid = r->fid->qid;
     ixp_respond(r, nil);
 }
 
-// fs_create handles Tcreate Fcall messages.
 void fs_create(Ixp9Req *r) {
-    FidState *state = r->fid->aux; // FID for the parent directory
-    char new_relative_path[PATH_MAX];
+    FidState *state = r->fid->aux;
+    char *new_path;
     ResolvedPath resolved;
-    struct stat st_new;            // To stat the newly created item
-    int fd_create = -1;
-    mode_t mode_os;
-    FidState *new_fid_state;
+    struct stat st;
+    mode_t permissions;
+    uint32_t types;
+    int flags;
+    int created = 0;
+    int is_directory;
+    int is_symlink;
+    char *link_copy = NULL;
 
-    if (!state || !state->path) {
+    if(!state || !state->path) {
         ixp_respond(r, "invalid parent fid state for create");
         return;
     }
-    if(namespace_resolve(state->path, &resolved) < 0) {
-        ixp_respond(r, strerror(errno));
-        return;
-    }
-    if(resolved.synthetic) {
-        ixp_respond(r, strerror(EPERM));
-        return;
-    }
-
-    if (strcmp(state->path, "/") == 0) {
-        snprintf(new_relative_path, sizeof(new_relative_path), "/%s", r->ifcall.tcreate.name);
-    } else {
-        snprintf(new_relative_path, sizeof(new_relative_path), "%s/%s", state->path, r->ifcall.tcreate.name);
-    }
-
-    if (namespace_resolve(new_relative_path, &resolved) < 0) {
-        ixp_respond(r, strerror(errno));
-        return;
-    }
-
-    mode_os = r->ifcall.tcreate.perm & 0777;
-
-    if (r->ifcall.tcreate.perm & P9_DMDIR) {
-        if (mkdir(resolved.native_path, mode_os) < 0) {
-            ixp_respond(r, strerror(errno));
-            return;
-        }
-    } else if (r->ifcall.tcreate.perm & P9_DMSYMLINK) {
-        const char *target = r->ifcall.tcreate.extension;
-        if (!target || !target[0]) {
-            ixp_respond(r, "symlink target required");
-            return;
-        }
-        if (symlink(target, resolved.native_path) < 0) {
-            ixp_respond(r, strerror(errno));
-            return;
-        }
-    } else {
-        // Create regular file
-        int create_os_flags = O_CREAT | O_EXCL; 
-        switch (r->ifcall.tcreate.mode & 3) { 
-            case P9_OREAD:  create_os_flags |= O_RDONLY; break;
-            case P9_OWRITE: create_os_flags |= O_WRONLY; break;
-            case P9_ORDWR:  create_os_flags |= O_RDWR;   break;
-        }
-        if (r->ifcall.tcreate.mode & P9_OTRUNC) create_os_flags |= O_TRUNC;
-        if (r->ifcall.tcreate.mode & P9_OAPPEND) create_os_flags |= O_APPEND;
-
-        fd_create = open(resolved.native_path, create_os_flags, mode_os);
-        if (fd_create < 0) {
-            ixp_respond(r, strerror(errno));
-            return;
-        }
-        close(fd_create); 
-    }
-
-    if (lstat(resolved.native_path, &st_new) < 0) {
-        ixp_respond(r, strerror(errno));
-        return;
-    }
-
-    if (r->fid->aux) {
-        FidState* old_state_on_fid = r->fid->aux;
-        if (old_state_on_fid->path) free(old_state_on_fid->path);
-        free(old_state_on_fid);
-        r->fid->aux = NULL;
-    }
-    
-    new_fid_state = malloc(sizeof(FidState));
-    if (!new_fid_state) {
-        ixp_respond(r, "out of memory for new fid state");
-        return;
-    }
-
-    new_fid_state->path = strdup(new_relative_path);
-    if (!new_fid_state->path) {
-        free(new_fid_state);
-        ixp_respond(r, "out of memory for new fid path");
-        return;
-    }
-    
-    new_fid_state->open_mode = r->ifcall.tcreate.mode;
-    new_fid_state->open_flags = 0; 
-    switch (r->ifcall.tcreate.mode & 3) {
-        case P9_OREAD:  new_fid_state->open_flags = O_RDONLY; break;
-        case P9_OWRITE: new_fid_state->open_flags = O_WRONLY; break;
-        case P9_ORDWR:  new_fid_state->open_flags = O_RDWR;   break;
-    }
-    if (r->ifcall.tcreate.mode & P9_OTRUNC) new_fid_state->open_flags |= O_TRUNC;
-    if (r->ifcall.tcreate.mode & P9_OAPPEND) new_fid_state->open_flags |= O_APPEND;
-
-    r->fid->aux = new_fid_state;
-
-    r->fid->qid.path = namespace_qid(&resolved, &st_new);
-    r->fid->qid.version = st_new.st_mtime;
-    if (S_ISDIR(st_new.st_mode)) {
-        r->fid->qid.type = P9_QTDIR;
-    } else if (S_ISLNK(st_new.st_mode)) {
-        r->fid->qid.type = P9_QTSYMLINK;
-    } else {
-        r->fid->qid.type = P9_QTFILE;
-    }
-
-    r->ofcall.rcreate.qid = r->fid->qid;
-    r->ofcall.rcreate.iounit = 0; 
-    
-    ixp_respond(r, nil);
-}
-
-// fs_remove handles Tremove Fcall messages.
-void fs_remove(Ixp9Req *r) {
-    FidState *state = r->fid->aux;
-    ResolvedPath resolved;
-    struct stat st; 
-
-    if (!state || !state->path) {
-        ixp_respond(r, "invalid fid state for remove");
-        return;
-    }
-
     if(namespace_is_protected(state->path)) {
         ixp_respond(r, strerror(EPERM));
         return;
     }
-    if (namespace_resolve(state->path, &resolved) < 0) {
+    new_path = namespace_join_virtual_alloc(state->path,
+                                            r->ifcall.tcreate.name);
+    if(!new_path) {
         ixp_respond(r, strerror(errno));
         return;
     }
-
-    if (lstat(resolved.native_path, &st) < 0) {
-        ixp_respond(r, strerror(errno)); 
+    if(namespace_resolve(new_path, &resolved) < 0 ||
+       open_flags(r->ifcall.tcreate.mode, &flags) < 0) {
+        int error = errno;
+        s9_free(new_path);
+        ixp_respond(r, strerror(error));
         return;
     }
-
-    if (S_ISDIR(st.st_mode)) {
-        if (rmdir(resolved.native_path) < 0) {
-            ixp_respond(r, strerror(errno));
+    types = r->ifcall.tcreate.perm & ~0777U;
+    is_directory = !!(types & P9_DMDIR);
+    is_symlink = !!(types & P9_DMSYMLINK);
+    if(types != 0 && types != P9_DMDIR && types != P9_DMSYMLINK) {
+        s9_free(new_path);
+        ixp_respond(r, strerror(EOPNOTSUPP));
+        return;
+    }
+    if(is_symlink) {
+        if((r->ifcall.tcreate.mode & 3) != P9_OREAD ||
+           (r->ifcall.tcreate.mode & P9_OTRUNC)) {
+            s9_free(new_path);
+            ixp_respond(r, strerror(EACCES));
             return;
         }
-    } else { 
-        if (unlink(resolved.native_path) < 0) {
-            ixp_respond(r, strerror(errno));
+        if(!r->ifcall.tcreate.extension ||
+           !r->ifcall.tcreate.extension[0]) {
+            s9_free(new_path);
+            ixp_respond(r, "symlink target required");
+            return;
+        }
+        link_copy = s9_strdup(r->ifcall.tcreate.extension);
+        if(!link_copy) {
+            s9_free(new_path);
+            ixp_respond(r, "out of memory");
             return;
         }
     }
+    if(is_directory && ((r->ifcall.tcreate.mode & 3) != P9_OREAD ||
+                        (r->ifcall.tcreate.mode & P9_OTRUNC))) {
+        s9_free(link_copy);
+        s9_free(new_path);
+        ixp_respond(r, strerror(EACCES));
+        return;
+    }
+    permissions = r->ifcall.tcreate.perm & 0777;
+    if(is_directory) {
+        if(platform_mkdir(&resolved, permissions) < 0)
+            goto fail;
+        created = 1;
+        state->dir = platform_opendir(&resolved);
+        if(!state->dir)
+            goto fail;
+    } else if(is_symlink) {
+        if(platform_symlink(link_copy, &resolved) < 0)
+            goto fail;
+        created = 1;
+        state->symlink = link_copy;
+        state->symlink_length = strlen(link_copy);
+        link_copy = NULL;
+    } else {
+        state->fd = platform_open(&resolved, flags | O_CREAT | O_EXCL,
+                                  permissions);
+        if(state->fd < 0)
+            goto fail;
+        created = 1;
+    }
+    if(platform_lstat(&resolved, &st) < 0)
+        goto fail;
+
+    s9_free(state->path);
+    state->path = new_path;
+    state->open_mode = r->ifcall.tcreate.mode;
+    state->open_flags = flags;
+    state->remove_on_close = !!(r->ifcall.tcreate.mode & P9_ORCLOSE);
+    state->opened_stat = st;
+    state->stat_valid = 1;
+    r->fid->qid.type = is_directory ? P9_QTDIR :
+                       is_symlink ? P9_QTSYMLINK : P9_QTFILE;
+    r->fid->qid.path = namespace_qid(&resolved, &st);
+    qid_bump(r->fid->qid.path);
+    r->fid->qid.version = qid_version(r->fid->qid.path, &st);
+    r->ofcall.rcreate.qid = r->fid->qid;
+    r->ofcall.rcreate.iounit = 0;
+    s9_free(link_copy);
+    ixp_respond(r, nil);
+    return;
+
+fail:
+    {
+        int error = errno;
+        fid_state_close(state);
+        if(created) {
+            if(is_directory)
+                platform_remove(&resolved, 1);
+            else
+                platform_remove(&resolved, 0);
+        }
+        s9_free(link_copy);
+        s9_free(new_path);
+        ixp_respond(r, strerror(error));
+    }
+}
+
+void fs_remove(Ixp9Req *r) {
+    FidState *state = r->fid->aux;
+    ResolvedPath resolved;
+    struct stat st;
+
+    if(!state || !state->path) {
+        ixp_respond(r, "invalid fid state for remove");
+        return;
+    }
+    if(namespace_is_protected(state->path)) {
+        ixp_respond(r, strerror(EPERM));
+        return;
+    }
+    if(namespace_resolve(state->path, &resolved) < 0 ||
+       platform_lstat(&resolved, &st) < 0) {
+        ixp_respond(r, strerror(errno));
+        return;
+    }
+    if(platform_remove(&resolved, S_ISDIR(st.st_mode)) < 0) {
+        ixp_respond(r, strerror(errno));
+        return;
+    }
+    qid_bump(r->fid->qid.path);
     ixp_respond(r, nil);
 }

@@ -1,5 +1,6 @@
 #include "namespace.h"
 #include "server.h"
+#include "platform.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -48,6 +49,7 @@ static int encode_name(const char *name, char *encoded, size_t size) {
 void namespace_cleanup(void) {
     size_t i;
 
+    platform_namespace_cleanup(&namespace);
     free(namespace.native_root);
     for(i = 0; i < namespace.nroots; i++) {
         free(namespace.roots[i].name);
@@ -134,6 +136,10 @@ int namespace_init(const char *root) {
         namespace_cleanup();
         return -1;
     }
+    if(platform_namespace_ready(&namespace) < 0) {
+        namespace_cleanup();
+        return -1;
+    }
     return 0;
 }
 
@@ -169,6 +175,14 @@ int namespace_resolve(const char *path, ResolvedPath *resolved) {
     memset(resolved, 0, sizeof(*resolved));
 
     if(!namespace.synthetic) {
+        name = cleaned;
+        while(*name == '/')
+            name++;
+        if(strlen(name) >= sizeof(resolved->relative_path)) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        strcpy(resolved->relative_path, name);
         if(joinpath(resolved->native_path, sizeof(resolved->native_path),
                     namespace.native_root, cleaned) < 0) {
             errno = ENAMETOOLONG;
@@ -198,8 +212,14 @@ int namespace_resolve(const char *path, ResolvedPath *resolved) {
             return -1;
         }
         strcpy(resolved->native_path, namespace.roots[index].path);
+        resolved->relative_path[0] = '\0';
         return 0;
     }
+    if(strlen(remainder + 1) >= sizeof(resolved->relative_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    strcpy(resolved->relative_path, remainder + 1);
     if(joinpath(resolved->native_path, sizeof(resolved->native_path),
                 namespace.roots[index].path,
                 remainder + 1) < 0) {
@@ -211,7 +231,7 @@ int namespace_resolve(const char *path, ResolvedPath *resolved) {
 
 int namespace_join_virtual(char *dst, size_t dstsize, const char *dir,
                            const char *name) {
-    if(!dst || !dir || !name || strchr(name, '/')) {
+    if(!dst || !dir || !namespace_valid_component(name)) {
         errno = EINVAL;
         return -1;
     }
@@ -224,6 +244,40 @@ int namespace_join_virtual(char *dst, size_t dstsize, const char *dir,
     }
     cleanname(dst);
     return 0;
+}
+
+int namespace_valid_component(const char *name) {
+    return name && name[0] && !strchr(name, '/') &&
+           strcmp(name, ".") != 0 && strcmp(name, "..") != 0;
+}
+
+char *namespace_join_virtual_alloc(const char *dir, const char *name) {
+    size_t dir_length;
+    size_t name_length;
+    size_t length;
+    char *path;
+
+    if(!dir || !namespace_valid_component(name)) {
+        errno = EINVAL;
+        return NULL;
+    }
+    dir_length = strlen(dir);
+    name_length = strlen(name);
+    if(dir_length > SIZE_MAX - name_length - 2) {
+        errno = ENAMETOOLONG;
+        return NULL;
+    }
+    length = dir_length + name_length + 2;
+    path = s9_malloc(length);
+    if(!path) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    if(strcmp(dir, "/") == 0)
+        snprintf(path, length, "/%s", name);
+    else
+        snprintf(path, length, "%s/%s", dir, name);
+    return path;
 }
 
 int namespace_is_protected(const char *path) {

@@ -1,10 +1,71 @@
 #include "server.h"
-#include <stdio.h>
+#include "platform.h"
+
+#include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <errno.h>
-#include <fcntl.h> // For O_RDONLY, O_WRONLY, O_RDWR, O_APPEND, O_TRUNC
+
+Simple9pServer simple9p;
+
+typedef struct QidGeneration {
+    uint64_t path;
+    uint32_t value;
+    struct QidGeneration *next;
+} QidGeneration;
+
+uint32_t qid_version(uint64_t path, const struct stat *st) {
+    QidGeneration *generation;
+    uint32_t version = (uint32_t)st->st_mtime;
+
+    for(generation = simple9p.generations; generation;
+        generation = generation->next) {
+        if(generation->path == path)
+            return version ^ generation->value;
+    }
+    return version;
+}
+
+int qid_prepare(uint64_t path) {
+    QidGeneration *generation;
+
+    for(generation = simple9p.generations; generation;
+        generation = generation->next) {
+        if(generation->path == path) {
+            return 0;
+        }
+    }
+    generation = s9_malloc(sizeof(*generation));
+    if(!generation)
+        return -1;
+    generation->path = path;
+    generation->value = 0;
+    generation->next = simple9p.generations;
+    simple9p.generations = generation;
+    return 0;
+}
+
+void qid_bump(uint64_t path) {
+    QidGeneration *generation;
+
+    for(generation = simple9p.generations; generation;
+        generation = generation->next) {
+        if(generation->path == path) {
+            generation->value++;
+            return;
+        }
+    }
+}
+
+void simple9p_state_cleanup(void) {
+    QidGeneration *generation;
+
+    while((generation = simple9p.generations) != NULL) {
+        simple9p.generations = generation->next;
+        s9_free(generation);
+    }
+}
 
 static void set_qid(IxpQid *qid, const ResolvedPath *resolved,
                     const struct stat *st) {
@@ -20,166 +81,213 @@ static void set_qid(IxpQid *qid, const ResolvedPath *resolved,
     else if(S_ISLNK(st->st_mode))
         qid->type = P9_QTSYMLINK;
     qid->path = namespace_qid(resolved, st);
-    qid->version = st->st_mtime;
+    qid->version = qid_version(qid->path, st);
 }
 
-// fs_attach handles the Tattach Fcall.
-// It initializes a new FidState for the root of the filesystem.
+void fid_state_register(FidState *state) {
+    state->previous = NULL;
+    state->next = simple9p.fids;
+    if(state->next)
+        state->next->previous = state;
+    simple9p.fids = state;
+}
+
+void fid_state_unregister(FidState *state) {
+    if(state->previous)
+        state->previous->next = state->next;
+    else if(simple9p.fids == state)
+        simple9p.fids = state->next;
+    if(state->next)
+        state->next->previous = state->previous;
+    state->previous = NULL;
+    state->next = NULL;
+}
+
+void fid_state_close(FidState *state) {
+    DirCheckpoint *checkpoint;
+
+    if(!state)
+        return;
+    if(state->fd >= 0) {
+        close(state->fd);
+        state->fd = -1;
+    }
+    if(state->dir) {
+        closedir(state->dir);
+        state->dir = NULL;
+    }
+    s9_free(state->symlink);
+    state->symlink = NULL;
+    state->symlink_length = 0;
+    state->stat_valid = 0;
+    state->remove_on_close = 0;
+    state->open_mode = 0;
+    state->open_flags = 0;
+    while((checkpoint = state->checkpoints) != NULL) {
+        state->checkpoints = checkpoint->next;
+        s9_free(checkpoint);
+    }
+    state->dir_offset = 0;
+}
+
+FidState *fid_state_create(const char *path) {
+    FidState *state;
+
+    state = s9_malloc(sizeof(*state));
+    if(!state)
+        return NULL;
+    memset(state, 0, sizeof(*state));
+    state->fd = -1;
+    state->path = s9_strdup(path);
+    if(!state->path) {
+        s9_free(state);
+        return NULL;
+    }
+    fid_state_register(state);
+    return state;
+}
+
+void fid_state_destroy(FidState *state) {
+    if(!state)
+        return;
+    fid_state_unregister(state);
+    fid_state_close(state);
+    s9_free(state->path);
+    s9_free(state);
+}
+
 void fs_attach(Ixp9Req *r) {
-    FidState *state = malloc(sizeof(FidState));
-    if (!state) {
-        ixp_respond(r, "out of memory");
-        return;
-    }
-
-    state->path = strdup("/"); // Represents the root of the served directory
-    if (!state->path) {
-        free(state);
-        ixp_respond(r, "out of memory");
-        return;
-    }
-    state->open_mode = 0;  // Not opened in a specific mode yet
-    state->open_flags = 0; // No OS flags yet
-
+    FidState *state;
     ResolvedPath resolved;
-    struct stat st_root;
-    if (namespace_resolve("/", &resolved) < 0) {
-         free(state->path);
-         free(state);
-         ixp_respond(r, strerror(errno));
-         return;
-    }
-    if (!resolved.synthetic && lstat(resolved.native_path, &st_root) < 0) {
-        free(state->path);
-        free(state);
-        ixp_respond(r, strerror(errno));
+    struct stat st;
+
+    state = fid_state_create("/");
+    if(!state) {
+        ixp_respond(r, "out of memory");
         return;
     }
-
-    set_qid(&r->fid->qid, &resolved, &st_root);
+    if(namespace_resolve("/", &resolved) < 0 ||
+       (!resolved.synthetic && platform_lstat(&resolved, &st) < 0)) {
+        int error = errno;
+        fid_state_destroy(state);
+        ixp_respond(r, strerror(error));
+        return;
+    }
+    if(resolved.synthetic)
+        memset(&st, 0, sizeof(st));
+    set_qid(&r->fid->qid, &resolved, &st);
     r->fid->aux = state;
     r->ofcall.rattach.qid = r->fid->qid;
     ixp_respond(r, nil);
 }
 
-// fs_walk handles the Twalk Fcall.
-// It navigates the filesystem, creating a new FID (newfid) for the target path.
 void fs_walk(Ixp9Req *r) {
-    FidState *state = r->fid->aux; // Current FID's state
-    FidState *newstate;            // State for the new FID (r->newfid)
-    char current_relative_path[PATH_MAX];
-    ResolvedPath resolved;
-    struct stat st;
-    int i;
+    FidState *state = r->fid->aux;
+    char *candidate;
+    unsigned int i;
+    IxpQid final_qid;
 
-    if (!state || !state->path) {
+    if(!state || !state->path) {
         ixp_respond(r, "invalid fid state for walk");
         return;
     }
-
-    // Clone current fid state for the new fid
-    newstate = malloc(sizeof(FidState));
-    if (!newstate) {
+    candidate = s9_strdup(state->path);
+    if(!candidate) {
         ixp_respond(r, "out of memory");
         return;
     }
-    newstate->path = strdup(state->path);
-    if (!newstate->path) {
-        free(newstate);
-        ixp_respond(r, "out of memory");
-        return;
-    }
-    newstate->open_mode = 0;  // New FID is not opened yet
-    newstate->open_flags = 0;
-    r->newfid->aux = newstate; // Attach new state to the new FID
+    final_qid = r->fid->qid;
 
-    // If no names to walk (nwname == 0), newfid is a clone of fid
-    if (r->ifcall.twalk.nwname == 0) {
-        r->newfid->qid = r->fid->qid; // QID is the same
-        // newstate->path is already a copy of state->path
-        ixp_respond(r, nil);
-        return;
-    }
+    for(i = 0; i < r->ifcall.twalk.nwname; i++) {
+        char *next;
+        ResolvedPath resolved;
+        struct stat st;
 
-    // Make a mutable copy of the path for constructing the new path
-    strncpy(current_relative_path, newstate->path, PATH_MAX -1);
-    current_relative_path[PATH_MAX -1] = '\0';
-
-    for (i = 0; i < r->ifcall.twalk.nwname; i++) {
-        const char *name_component = r->ifcall.twalk.wname[i];
-
-        char next_path[PATH_MAX];
-
-        if(namespace_join_virtual(next_path, sizeof(next_path),
-                                  current_relative_path, name_component) < 0) {
-            ixp_respond(r, "path too long during walk");
-            return;
+        next = namespace_join_virtual_alloc(candidate,
+                                            r->ifcall.twalk.wname[i]);
+        if(!next) {
+            if(i == 0) {
+                int error = errno;
+                s9_free(candidate);
+                ixp_respond(r, strerror(error));
+                return;
+            }
+            break;
         }
-        strcpy(current_relative_path, next_path);
-
-        if(namespace_resolve(current_relative_path, &resolved) < 0) {
-            r->ofcall.rwalk.nwqid = i;
-            ixp_respond(r, strerror(errno));
-            return;
+        s9_free(candidate);
+        candidate = next;
+        if(namespace_resolve(candidate, &resolved) < 0 ||
+           (!resolved.synthetic && platform_lstat(&resolved, &st) < 0)) {
+            if(i == 0) {
+                int error = errno;
+                s9_free(candidate);
+                ixp_respond(r, strerror(error));
+                return;
+            }
+            break;
         }
-
-        if(!resolved.synthetic && lstat(resolved.native_path, &st) < 0) {
-            // If any component doesn't exist, walk fails.
-            // Respond with error, and number of successful walks (i)
-            r->ofcall.rwalk.nwqid = i; // Report how many names were successfully walked
-            ixp_respond(r, strerror(errno));
-            return;
-        }
-
+        if(resolved.synthetic)
+            memset(&st, 0, sizeof(st));
         set_qid(&r->ofcall.rwalk.wqid[i], &resolved, &st);
-    }
-
-    // All components walked successfully
-    r->ofcall.rwalk.nwqid = i;
-    r->newfid->qid = r->ofcall.rwalk.wqid[i - 1]; // QID of the final target
-
-    // Update the path in newstate to the final walked path
-    free(newstate->path);
-    newstate->path = strdup(current_relative_path);
-    if (!newstate->path) {
-        // This is tricky: walk succeeded, but server ran out of memory for final path.
-        // Should ideally not happen.
-        ixp_respond(r, "out of memory storing final path for walk");
-        // The newfid is now in an inconsistent state.
-        return;
-    }
-
-    ixp_respond(r, nil);
-}
-
-// fs_clunk handles the Tclunk Fcall.
-// It signifies that a FID is no longer needed by the client.
-// The server should release any resources associated with the FID.
-void fs_clunk(Ixp9Req *r) {
-    // FidState is freed by fs_freefid, which is called by libixp
-    // after fs_clunk responds or if the FID is implicitly clunked (e.g. Tremove).
-    ixp_respond(r, nil);
-}
-
-// fs_flush handles the Tflush Fcall.
-// It's used to abort a pending request. This simple server doesn't
-// have complex pending requests that would need explicit flushing logic beyond what libixp handles.
-void fs_flush(Ixp9Req *r) {
-    // For a simple server, responding nil is usually sufficient.
-    // libixp handles the actual flushing of messages for the old tag.
-    ixp_respond(r, nil);
-}
-
-// fs_freefid is called by libixp when a FID is destroyed.
-// It should free any auxiliary data (FidState) attached to the FID.
-void fs_freefid(IxpFid *f) {
-    if (f && f->aux) {
-        FidState *state = f->aux;
-        if (state->path) {
-            free(state->path);
-            state->path = NULL;
+        final_qid = r->ofcall.rwalk.wqid[i];
+        if(i + 1 < r->ifcall.twalk.nwname &&
+           !(final_qid.type & P9_QTDIR)) {
+            i++;
+            break;
         }
-        free(state);
+    }
+    r->ofcall.rwalk.nwqid = i;
+
+    if(i == r->ifcall.twalk.nwname) {
+        if(r->newfid == r->fid) {
+            char *old_path = state->path;
+            state->path = candidate;
+            s9_free(old_path);
+        } else {
+            FidState *newstate = fid_state_create(candidate);
+            if(!newstate) {
+                s9_free(candidate);
+                ixp_respond(r, "out of memory");
+                return;
+            }
+            r->newfid->aux = newstate;
+            s9_free(candidate);
+        }
+        r->newfid->qid = final_qid;
+    } else {
+        s9_free(candidate);
+    }
+    ixp_respond(r, nil);
+}
+
+void fs_clunk(Ixp9Req *r) {
+    FidState *state = r->fid->aux;
+
+    if(state && state->remove_on_close) {
+        ResolvedPath resolved;
+        struct stat st;
+
+        if(namespace_resolve(state->path, &resolved) < 0 ||
+           platform_lstat(&resolved, &st) < 0) {
+            ixp_respond(r, strerror(errno));
+            return;
+        }
+        if(platform_remove(&resolved, S_ISDIR(st.st_mode)) < 0) {
+            ixp_respond(r, strerror(errno));
+            return;
+        }
+        qid_bump(r->fid->qid.path);
+    }
+    ixp_respond(r, nil);
+}
+
+void fs_flush(Ixp9Req *r) {
+    ixp_respond(r, nil);
+}
+
+void fs_freefid(IxpFid *f) {
+    if(f && f->aux) {
+        fid_state_destroy(f->aux);
         f->aux = NULL;
     }
 }
