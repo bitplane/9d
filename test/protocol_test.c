@@ -72,9 +72,8 @@ static void version(Client *client) {
     ixp_freefcall(&response);
 }
 
-static void attach(Client *client, uint32_t fid) {
+static IxpFcall send_attach(Client *client, uint32_t fid) {
     IxpFcall request = {0};
-    IxpFcall response;
 
     request.hdr.type = P9_TAttach;
     request.hdr.fid = fid;
@@ -82,7 +81,12 @@ static void attach(Client *client, uint32_t fid) {
     request.tattach.uname = "test";
     request.tattach.aname = "";
     request.tattach.n_uname = (uint32_t)getuid();
-    response = rpc(client, &request);
+    return rpc(client, &request);
+}
+
+static void attach(Client *client, uint32_t fid) {
+    IxpFcall response = send_attach(client, fid);
+
     expect_type("attach", &response, P9_RAttach);
     ixp_freefcall(&response);
 }
@@ -271,6 +275,33 @@ static void test_walks(Client *client) {
 
     response = walk(client, 1, 4, invalid, 1);
     expect_type("invalid component", &response, P9_RError);
+    ixp_freefcall(&response);
+}
+
+static void test_libixp_fid_cleanup(Client *client) {
+    const char *directory[] = { "dir" };
+    IxpFcall response;
+
+    response = send_attach(client, 1);
+    expect_type("duplicate attach", &response, P9_RError);
+    ixp_freefcall(&response);
+
+    response = walk(client, 1, 100, NULL, 0);
+    expect_type("zero-element fid clone", &response, P9_RWalk);
+    assert(response.rwalk.nwqid == 0);
+    ixp_freefcall(&response);
+    response = clunk(client, 100);
+    expect_type("clunk cloned fid", &response, P9_RClunk);
+    ixp_freefcall(&response);
+
+    response = walk(client, 1, 101, directory, 1);
+    expect_type("create walked fid", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = walk(client, 1, 101, directory, 1);
+    expect_type("duplicate walk fid", &response, P9_RError);
+    ixp_freefcall(&response);
+    response = clunk(client, 101);
+    expect_type("clunk original walked fid", &response, P9_RClunk);
     ixp_freefcall(&response);
 }
 
@@ -683,6 +714,7 @@ int main(int argc, char **argv) {
     assert(symlink(outside, path) == 0);
 
     child = start_server(argv[1], root, &client);
+    test_libixp_fid_cleanup(&client);
     test_walks(&client);
     test_rename_and_open_identity(&client, root);
     test_truncate_and_symlink(&client, root);
