@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 #include <sys/stat.h>
 
 #ifndef S9_PATH_MAX
