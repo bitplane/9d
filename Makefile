@@ -3,12 +3,13 @@ include deps.mk
 CC ?= gcc
 AR ?= ar
 STRIP ?= strip
-CPPFLAGS += -D_XOPEN_SOURCE=700 -D_POSIX_C_SOURCE=200809L \
-	-Ilibixp/include
+API_CPPFLAGS ?= -D_XOPEN_SOURCE=700 -D_POSIX_C_SOURCE=200809L
+CPPFLAGS += $(API_CPPFLAGS) -Ilibixp/include
 CFLAGS += -g -O0
-LDFLAGS += -static
 DEPFLAGS = -MMD -MP
-LIBS = build/libixp.a -lpthread
+THREAD_LIBS ?= -lpthread
+LIBS = build/libixp.a $(THREAD_LIBS)
+LINK.c = $(CC) $(LDFLAGS)
 LIBIXP_CFLAGS = $(filter-out -Wall -Wextra -Wpedantic -Wconversion \
 	-Wshadow -Wformat=2 -Werror,$(CFLAGS))
 WARNING_CFLAGS = -g -O2 -Wall -Wextra -Wpedantic -Wconversion -Wshadow \
@@ -17,6 +18,13 @@ SANITIZER_FLAGS = -g -O1 -fno-omit-frame-pointer \
 	-fsanitize=address,undefined
 RELEASE_CFLAGS ?= -Os -DNDEBUG
 EMBEDDED_PATH_MAX ?= 1024
+
+STATIC ?= 1
+ifeq ($(STATIC),1)
+LDFLAGS += -static
+else ifneq ($(STATIC),0)
+$(error STATIC must be 0 or 1)
+endif
 
 NETWORK ?= 1
 ifeq ($(NETWORK),0)
@@ -30,8 +38,11 @@ SRCS = simple9p.c alloc.c path.c namespace.c platform_$(PLATFORM).c \
 	fs_ops.c fs_io.c fs_stat.c fs_dir.c
 OBJS = $(patsubst %.c,build/%.o,$(SRCS))
 TARGET = build/simple9p
-LIBIXP_NAMES = convert error map message request rpc server socket transport \
-	util timer client thread
+LIBIXP_NAMES = convert error map message request server transport util timer \
+	thread
+ifeq ($(NETWORK),1)
+LIBIXP_NAMES += rpc socket client
+endif
 LIBIXP_SRCS = $(addprefix libixp/lib/libixp/,$(addsuffix .c,$(LIBIXP_NAMES)))
 LIBIXP_OBJS = $(addprefix build/libixp/,$(addsuffix .o,$(LIBIXP_NAMES)))
 DEPS = $(OBJS:.o=.d) $(LIBIXP_OBJS:.o=.d) \
@@ -47,7 +58,7 @@ endif
 all: $(TARGET)
 
 $(TARGET): $(OBJS) build/libixp.a
-	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+	$(LINK.c) -o $@ $(OBJS) $(LIBS)
 
 build/%.o: %.c | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
