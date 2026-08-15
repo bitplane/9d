@@ -93,7 +93,7 @@ dist: deps
 
 test/9pfuse/build/9pfuse:
 	@if [ ! -d test/9pfuse ]; then \
-		git clone -b qemount https://github.com/bitplane/9pfuse.git test/9pfuse; \
+		git clone -b mountin-2026-08-15 https://github.com/bitplane/9pfuse.git test/9pfuse; \
 	fi
 	cd test/9pfuse && meson setup build && meson compile -C build
 

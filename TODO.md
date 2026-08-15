@@ -5,5 +5,5 @@
 - Verify chmod in the minimal Linux guest without `/proc`, then add the
   appropriate `fchmodat` fallback if required.
 - Use `F_DUPFD_CLOEXEC` where the target platform provides it.
-- Update qemount to consume the complete simple9p release archive, pass its
+- Update Mountin to consume the complete simple9p release archive, pass its
   embedded path bound, and remove the separate libixp source dependency.
