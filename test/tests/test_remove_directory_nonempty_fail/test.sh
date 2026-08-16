@@ -12,5 +12,5 @@ if [[ ! -d "nonempty_dir_to_rm" ]]; then
 fi
 echo "rmdir correctly failed on non-empty directory."
 ls -la # Show it's still there
-# Now clean it up if recursive rm is supported (test for simple9p might not support -rf)
+# Now clean it up if recursive rm is supported (test for 9d might not support -rf)
 # For now, just verify it's still there.

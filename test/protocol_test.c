@@ -309,6 +309,28 @@ static pid_t start_server_mode(const char *binary, const char *root,
     return child;
 }
 
+static pid_t start_raw_server(const char *binary, const char *root,
+                              Client *client) {
+    int sockets[2];
+    pid_t child;
+
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    child = fork();
+    assert(child >= 0);
+    if(child == 0) {
+        close(sockets[0]);
+        assert(dup2(sockets[1], STDIN_FILENO) == STDIN_FILENO);
+        close(sockets[1]);
+        execl(binary, binary, "-p", "-", root, (char *)NULL);
+        _exit(127);
+    }
+    close(sockets[1]);
+    memset(client, 0, sizeof(*client));
+    client->fd = sockets[0];
+    client->version = IXP_V9P2000;
+    return child;
+}
+
 static pid_t start_server(const char *binary, const char *root,
                           Client *client) {
     return start_server_mode(binary, root, client, 0);
@@ -321,6 +343,87 @@ static void stop_server(Client *client, pid_t child) {
     assert(waitpid(child, &status, 0) == child);
     assert(WIFEXITED(status));
     assert(WEXITSTATUS(status) == 0);
+}
+
+static void send_fcall(Client *client, IxpFcall *request) {
+    IxpMsg message = ixp_message(client->send_buffer,
+                                 sizeof(client->send_buffer), MsgPack);
+
+    message.version = client->version;
+    assert(ixp_fcall2msg(&message, request) != 0);
+    assert(ixp_sendmsg(client->fd, &message) != 0);
+}
+
+static size_t drain_connection(Client *client) {
+    char buffer[256];
+    size_t total = 0;
+    ssize_t count;
+
+    shutdown(client->fd, SHUT_WR);
+    while((count = read(client->fd, buffer, sizeof(buffer))) > 0)
+        total += (size_t)count;
+    assert(count == 0);
+    return total;
+}
+
+static void expect_clean_server_exit(Client *client, pid_t child) {
+    int status;
+
+    close(client->fd);
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status));
+    assert(WEXITSTATUS(status) == 0);
+}
+
+static void test_reject_small_msize(const char *binary, const char *root,
+                                    uint32_t msize) {
+    IxpFcall request = {0};
+    Client client;
+    pid_t child = start_raw_server(binary, root, &client);
+
+    request.hdr.type = P9_TVersion;
+    request.hdr.tag = IXP_NOTAG;
+    request.version.msize = msize;
+    request.version.version = "9P2000";
+    send_fcall(&client, &request);
+    assert(drain_connection(&client) == 0);
+    expect_clean_server_exit(&client, child);
+}
+
+static void test_invalid_negotiation(const char *binary, const char *root) {
+    static const uint32_t invalid[] = { 0, 1, 23, 24 };
+    size_t index;
+
+    for(index = 0; index < sizeof(invalid) / sizeof(invalid[0]); index++)
+        test_reject_small_msize(binary, root, invalid[index]);
+}
+
+static void test_response_pack_failure(const char *binary, const char *root) {
+    IxpFcall request = {0};
+    IxpFcall response = {0};
+    IxpMsg message;
+    Client client;
+    pid_t child = start_raw_server(binary, root, &client);
+
+    request.hdr.type = P9_TVersion;
+    request.hdr.tag = IXP_NOTAG;
+    request.version.msize = 25;
+    request.version.version = "9P2000";
+    send_fcall(&client, &request);
+    message = ixp_message(client.receive_buffer, sizeof(client.receive_buffer),
+                          MsgUnpack);
+    assert(ixp_recvmsg(client.fd, &message) != 0);
+    assert(ixp_msg2fcall(&message, &response) != 0);
+    expect_type("small version", &response, P9_RVersion);
+    assert(response.version.msize == 25);
+    ixp_freefcall(&response);
+
+    memset(&request, 0, sizeof(request));
+    request.hdr.type = P9_TError;
+    request.hdr.tag = 1;
+    send_fcall(&client, &request);
+    assert(drain_connection(&client) == 0);
+    expect_clean_server_exit(&client, child);
 }
 
 static void test_walks(Client *client) {
@@ -705,6 +808,8 @@ static void test_containment(Client *client, const char *outside) {
     const char *link_only[] = { "escape" };
     IxpFcall response;
     IxpStat stat;
+    struct stat before;
+    struct stat after;
     char path[1024];
     char data[16] = {0};
     int fd;
@@ -725,12 +830,27 @@ static void test_containment(Client *client, const char *outside) {
     assert(memcmp(response.rread.data, outside, strlen(outside)) == 0);
     ixp_freefcall(&response);
 
+    make_path(path, sizeof(path), outside, "secret");
+    assert(lstat(path, &before) == 0);
     stat = unchanged_stat();
     stat.length = 0;
     response = wstat_fid(client, 91, &stat);
     expect_type("do not truncate through symlink", &response, P9_RError);
     ixp_freefcall(&response);
-    make_path(path, sizeof(path), outside, "secret");
+    stat = unchanged_stat();
+    stat.mode = P9_DMSYMLINK | 0777;
+    response = wstat_fid(client, 91, &stat);
+    expect_type("do not chmod through symlink", &response, P9_RError);
+    ixp_freefcall(&response);
+    stat = unchanged_stat();
+    stat.mtime = 1000000001;
+    response = wstat_fid(client, 91, &stat);
+    expect_type("do not set times through symlink", &response, P9_RError);
+    ixp_freefcall(&response);
+    assert(lstat(path, &after) == 0);
+    assert(after.st_size == before.st_size);
+    assert((after.st_mode & 0777) == (before.st_mode & 0777));
+    assert(after.st_mtime == before.st_mtime);
     fd = open(path, O_RDONLY);
     assert(fd >= 0);
     assert(read(fd, data, sizeof(data)) == 7);
@@ -969,8 +1089,8 @@ static void test_synthetic_namespace(const char *binary,
     pid_t child;
     char path[1024];
 
-    assert(setenv("SIMPLE9P_TEST_ROOT_1", first_root, 1) == 0);
-    assert(setenv("SIMPLE9P_TEST_ROOT_2", second_root, 1) == 0);
+    assert(setenv("NINED_TEST_ROOT_1", first_root, 1) == 0);
+    assert(setenv("NINED_TEST_ROOT_2", second_root, 1) == 0);
     child = start_server(binary, NULL, &client);
 
     stat = unchanged_stat();
@@ -1031,18 +1151,18 @@ static void test_synthetic_namespace(const char *binary,
     expect_error("protect synthetic root listing", &response, EPERM);
     ixp_freefcall(&response);
     stop_server(&client, child);
-    unsetenv("SIMPLE9P_TEST_ROOT_1");
-    unsetenv("SIMPLE9P_TEST_ROOT_2");
+    unsetenv("NINED_TEST_ROOT_1");
+    unsetenv("NINED_TEST_ROOT_2");
 
     make_path(path, sizeof(path), first_root, "created");
     assert(access(path, F_OK) < 0 && errno == ENOENT);
 }
 
 int main(int argc, char **argv) {
-    char template[] = "/tmp/simple9p-protocol-XXXXXX";
-    char outside_template[] = "/tmp/simple9p-outside-XXXXXX";
-    char first_template[] = "/tmp/simple9p-first-XXXXXX";
-    char second_template[] = "/tmp/simple9p-second-XXXXXX";
+    char template[] = "/tmp/9d-protocol-XXXXXX";
+    char outside_template[] = "/tmp/9d-outside-XXXXXX";
+    char first_template[] = "/tmp/9d-first-XXXXXX";
+    char second_template[] = "/tmp/9d-second-XXXXXX";
     char path[1024];
     char second[1024];
     char *root;
@@ -1114,6 +1234,8 @@ int main(int argc, char **argv) {
     make_path(path, sizeof(path), root, "escape");
     assert(symlink(outside, path) == 0);
 
+    test_invalid_negotiation(argv[1], root);
+    test_response_pack_failure(argv[1], root);
     child = start_server(argv[1], root, &client);
     test_libixp_fid_cleanup(&client);
     test_walks(&client);

@@ -18,4 +18,4 @@ COPY libixp ./libixp
 RUN make release
 
 # serve
-ENTRYPOINT ["/build/build/simple9p"]
+ENTRYPOINT ["/build/build/9d"]

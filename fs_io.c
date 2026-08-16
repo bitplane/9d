@@ -89,7 +89,7 @@ void fs_write(Ixp9Req *r) {
     off_t offset;
     ssize_t count;
 
-    if(simple9p.read_only) {
+    if(nined.read_only) {
         respond_errno(r, EROFS);
         return;
     }
@@ -137,7 +137,7 @@ void fs_open(Ixp9Req *r) {
         respond_errno(r, errno);
         return;
     }
-    if(simple9p.read_only &&
+    if(nined.read_only &&
        (((r->ifcall.topen.mode & 3) == P9_OWRITE) ||
         ((r->ifcall.topen.mode & 3) == P9_ORDWR) ||
         (r->ifcall.topen.mode & (P9_OTRUNC | P9_ORCLOSE)))) {
@@ -240,7 +240,7 @@ void fs_create(Ixp9Req *r) {
         respond_errno(r, EBADF);
         return;
     }
-    if(simple9p.read_only) {
+    if(nined.read_only) {
         respond_errno(r, EROFS);
         return;
     }
@@ -364,7 +364,7 @@ void fs_remove(Ixp9Req *r) {
         respond_errno(r, EBADF);
         return;
     }
-    if(simple9p.read_only) {
+    if(nined.read_only) {
         respond_errno(r, EROFS);
         return;
     }

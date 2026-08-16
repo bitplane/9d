@@ -85,7 +85,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -r          Serve the filesystem read-only\n");
     fprintf(stderr, "  -p address  Use '-' for a bidirectional stdin stream\n");
     fprintf(stderr, "              Use stream!path for a connected stream device\n");
-#ifndef SIMPLE9P_NO_NETWORK
+#ifndef NINED_NO_NETWORK
     fprintf(stderr, "              Otherwise listen on a libixp network address\n");
     fprintf(stderr, "              (default: tcp!localhost!564)\n");
 #endif
@@ -105,7 +105,7 @@ int main(int argc, char *argv[]) {
             usage(argv[0]);
             exit(0);
         case 'r':
-            simple9p.read_only = 1;
+            nined.read_only = 1;
             break;
         case 'p':
             addr = optarg;
@@ -130,7 +130,7 @@ int main(int argc, char *argv[]) {
     int fd;
     
     if(!addr) {
-#ifdef SIMPLE9P_NO_NETWORK
+#ifdef NINED_NO_NETWORK
         usage(argv[0]);
         exit(1);
 #else
@@ -144,7 +144,7 @@ int main(int argc, char *argv[]) {
     /* Check for stdio mode */
     if(strcmp(addr, "-") == 0) {
         /* Use stdin/stdout for 9P - requires bidirectional fd */
-        /* Caller should use: simple9p -p - /path <> /dev/device */
+        /* Caller should use: 9d -p - /path <> /dev/device */
         fd = STDIN_FILENO;
         if(debug)
             fprintf(stderr, "Using stdio (fd %d) for 9P\n", fd);
@@ -156,7 +156,7 @@ int main(int argc, char *argv[]) {
         /* Serve on stdin/stdout */
         serve_stream(fd);
 
-        simple9p_state_cleanup();
+        nined_state_cleanup();
         namespace_cleanup();
         return 0;
     }
@@ -179,7 +179,7 @@ int main(int argc, char *argv[]) {
         /* Serve the connected stream directly */
         serve_stream(fd);
     }
-#ifndef SIMPLE9P_NO_NETWORK
+#ifndef NINED_NO_NETWORK
     else {
         /* Try as network address */
         fd = ixp_announce(addr);
@@ -204,7 +204,7 @@ int main(int argc, char *argv[]) {
     }
 #endif
     
-    simple9p_state_cleanup();
+    nined_state_cleanup();
     namespace_cleanup();
     return 0;
 }

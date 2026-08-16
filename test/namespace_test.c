@@ -90,7 +90,7 @@ int main(void) {
     char second[PATH_MAX];
 
     assert(snprintf(temporary, sizeof(temporary),
-                    "/tmp/simple9p-namespace-%ld", (long)getpid()) <
+                    "/tmp/9d-namespace-%ld", (long)getpid()) <
            (int)sizeof(temporary));
     assert(mkdir(temporary, 0700) == 0);
     assert(snprintf(first, sizeof(first), "%s/first", temporary) <

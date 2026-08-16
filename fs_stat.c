@@ -69,7 +69,7 @@ int build_synthetic_stat(IxpStat *s, const char *name) {
     memset(s, 0, sizeof(*s));
     s->qid.type = P9_QTDIR;
     s->qid.path = namespace_root_qid();
-    s->qid.version = simple9p.qid_generation;
+    s->qid.version = nined.qid_generation;
     s->mode = P9_DMDIR | 0555;
     s->name = s9_strdup(name);
     s->uid = s9_strdup("none");
@@ -178,7 +178,7 @@ static RenameUpdate *prepare_updates(const char *old_path,
     RenameUpdate *updates = NULL;
     size_t old_length = strlen(old_path);
 
-    for(state = simple9p.fids; state; state = state->next) {
+    for(state = nined.fids; state; state = state->next) {
         RenameUpdate *update;
         const char *suffix;
         size_t new_length;
@@ -215,7 +215,7 @@ static RenameUpdate *prepare_updates(const char *old_path,
     return updates;
 }
 
-#ifdef SIMPLE9P_TESTING
+#ifdef NINED_TESTING
 int test_prepare_rename_updates(const char *old_path, const char *new_path) {
     RenameUpdate *updates = prepare_updates(old_path, new_path);
 
@@ -271,7 +271,7 @@ void fs_wstat(Ixp9Req *r) {
                         ownership_requested(requested));
     has_changes = change_name || change_length || change_mode ||
                   change_atime || change_mtime || change_ownership;
-    if(simple9p.read_only && has_changes) {
+    if(nined.read_only && has_changes) {
         respond_errno(r, EROFS);
         return;
     }

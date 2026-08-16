@@ -4,7 +4,7 @@
 echo "[DEBUG_SOURCE] Starting to source test_harness.sh" >&2
 
 # These variables are expected to be set by the calling script/environment
-# SIMPLE9P_BINARY, NINEP_FUSE_BINARY, HARNESS_DEBUG, HARNESS_PORT_BASE, HARNESS_RESULTS_ROOT_DIR
+# NINED_BINARY, NINEP_FUSE_BINARY, HARNESS_DEBUG, HARNESS_PORT_BASE, HARNESS_RESULTS_ROOT_DIR
 
 _HARNESS_TEMP_DIR=""
 _HARNESS_SERVER_PID=""
@@ -34,7 +34,7 @@ test_setup() {
     local test_case_path="$1"
     _harness_log "Setting up test: $test_case_path using port $_HARNESS_CURRENT_PORT"
 
-    _HARNESS_TEMP_DIR=$(mktemp -d "simple9ptest_$(basename "$test_case_path")_XXXXXX")
+    _HARNESS_TEMP_DIR=$(mktemp -d "9dtest_$(basename "$test_case_path")_XXXXXX")
     if [[ -z "$_HARNESS_TEMP_DIR" || ! -d "$_HARNESS_TEMP_DIR" ]]; then
         echo "[HARNESS_ERROR] Failed to create temporary directory." >&2
         return 1
@@ -108,8 +108,8 @@ test_connect() {
     _HARNESS_FUSE_MOUNT_PATH_FULL="$(pwd)/mount"
     local abs_actual_path; abs_actual_path=$(realpath "./actual") # Ensure server gets absolute path
 
-    _harness_log "Starting server: $SIMPLE9P_BINARY -p \"$_HARNESS_TCP_ADDRESS\" \"$abs_actual_path\""
-    "$SIMPLE9P_BINARY" -p "$_HARNESS_TCP_ADDRESS" "$abs_actual_path" &
+    _harness_log "Starting server: $NINED_BINARY -p \"$_HARNESS_TCP_ADDRESS\" \"$abs_actual_path\""
+    "$NINED_BINARY" -p "$_HARNESS_TCP_ADDRESS" "$abs_actual_path" &
     _HARNESS_SERVER_PID=$!
     _harness_log "Server PID: $_HARNESS_SERVER_PID"
     if ! _wait_for_tcp_port "localhost" "$_HARNESS_CURRENT_PORT"; then
@@ -278,11 +278,11 @@ test_diff() {
     grep -v "#### \[TEST RESULT START/END:" "./expected.all.raw" | \
         sed -E 's/^([-dlrwxsStT]{10}) +[0-9]+ /\1 NLINK /g' | \
         sed -E 's/^total [0-9]+$/total BLOCKS/' | \
-        sed -E 's|/[^ ]*/simple9ptest_[^/]+/(expected\|mount\|actual)|TESTROOT|g' > "./expected.all"
+        sed -E 's|/[^ ]*/9dtest_[^/]+/(expected\|mount\|actual)|TESTROOT|g' > "./expected.all"
     grep -v "#### \[TEST RESULT START/END:" "./actual.all.raw" | \
         sed -E 's/^([-dlrwxsStT]{10}) +[0-9]+ /\1 NLINK /g' | \
         sed -E 's/^total [0-9]+$/total BLOCKS/' | \
-        sed -E 's|/[^ ]*/simple9ptest_[^/]+/(expected\|mount\|actual)|TESTROOT|g' > "./actual.all"
+        sed -E 's|/[^ ]*/9dtest_[^/]+/(expected\|mount\|actual)|TESTROOT|g' > "./actual.all"
 
     # Perform the diff on filtered files
     if diff -u "./expected.all" "./actual.all" > "./results.diff"; then
@@ -368,7 +368,7 @@ test_run_all() {
     mkdir -p "$_CURRENT_TEST_RUN_ARCHIVE_DIR" || { echo "[HARNESS_ERROR] CRITICAL: Cannot create run archive: $_CURRENT_TEST_RUN_ARCHIVE_DIR"; return 1; }
     _harness_log "Archiving results for this run to: $_CURRENT_TEST_RUN_ARCHIVE_DIR"
 
-    if [[ -z "$SIMPLE9P_BINARY" || ! -x "$SIMPLE9P_BINARY" ]]; then echo "[HARNESS_ERROR] SIMPLE9P_BINARY invalid." >&2; return 1; fi
+    if [[ -z "$NINED_BINARY" || ! -x "$NINED_BINARY" ]]; then echo "[HARNESS_ERROR] NINED_BINARY invalid." >&2; return 1; fi
     if [[ -z "$NINEP_FUSE_BINARY" || ! -x "$NINEP_FUSE_BINARY" ]]; then echo "[HARNESS_ERROR] NINEP_FUSE_BINARY invalid." >&2; return 1; fi
     local base_port="${HARNESS_PORT_BASE:-56400}"; _harness_log "Base port: $base_port."
 

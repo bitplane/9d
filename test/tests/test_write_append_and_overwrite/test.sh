@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -e
-# Test append (might not be supported by simple9p O_APPEND flag directly in create/open)
+# Test append (might not be supported by 9d O_APPEND flag directly in create/open)
 # Standard redirection '>>' relies on underlying FS supporting append mode correctly.
 echo "Appended line." >> append_test.txt
 cat append_test.txt

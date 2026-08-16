@@ -6,7 +6,7 @@ wc -c truncate_me.txt
 
 # The 'truncate' command might use ftruncate syscall, which FUSE translates to setattr (wstat)
 # if the file is open, or a direct truncate operation.
-# We'll see if simple9p + FUSE handles the wstat to change length.
+# We'll see if 9d + FUSE handles the wstat to change length.
 truncate -s 0 truncate_me.txt
 
 echo "After truncate -s 0:"

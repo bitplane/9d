@@ -12,7 +12,7 @@ if [ -d "$destination/.git" ]; then
         echo "libixp has local changes; refusing to remove it." >&2
         exit 1
     fi
-elif [ ! -f "$destination/.simple9p-commit" ]; then
+elif [ ! -f "$destination/.9d-commit" ]; then
     echo "$destination is not a recognised managed dependency." >&2
     exit 1
 fi

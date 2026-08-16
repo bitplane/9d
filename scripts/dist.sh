@@ -41,7 +41,7 @@ if [ "$actual" != "$LIBIXP_COMMIT" ]; then
     exit 1
 fi
 
-package="simple9p-$version"
+package="9d-$version"
 stage_root="$root/build/dist-stage"
 stage="$stage_root/$package"
 output="$root/dist"
@@ -55,7 +55,7 @@ git -C "$root" ls-files -z --cached --others --exclude-standard |
     tar -C "$stage" -xf -
 mkdir -p "$stage/libixp"
 git -C "$root/libixp" archive HEAD | tar -C "$stage/libixp" -xf -
-printf '%s\n' "$LIBIXP_COMMIT" > "$stage/libixp/.simple9p-commit"
+printf '%s\n' "$LIBIXP_COMMIT" > "$stage/libixp/.9d-commit"
 
 tar -C "$stage_root" --sort=name --mtime="@$epoch" \
     --owner=0 --group=0 --numeric-owner -cJf "$archive" "$package"

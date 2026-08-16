@@ -8,8 +8,8 @@
 int platform_remove_native(const ResolvedPath *path, int directory);
 
 int platform_namespace_init(Namespace *ns) {
-    const char *first = getenv("SIMPLE9P_TEST_ROOT_1");
-    const char *second = getenv("SIMPLE9P_TEST_ROOT_2");
+    const char *first = getenv("NINED_TEST_ROOT_1");
+    const char *second = getenv("NINED_TEST_ROOT_2");
 
     if(!first || !second || namespace_use_synthetic(ns) < 0)
         return -1;
@@ -21,7 +21,7 @@ int platform_namespace_init(Namespace *ns) {
 int platform_remove(const ResolvedPath *path, int directory) {
     FidState *state;
 
-    for(state = simple9p.fids; state; state = state->next) {
+    for(state = nined.fids; state; state = state->next) {
         ResolvedPath open_path;
 
         if(namespace_resolve(state->path, &open_path) == 0 &&

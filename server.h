@@ -18,17 +18,17 @@ typedef struct DirCheckpoint {
     long cookie;
 } DirCheckpoint;
 
-typedef struct Simple9pServer {
+typedef struct NineDServer {
     FidState *fids;
     uint32_t qid_generation;
     int read_only;
-} Simple9pServer;
+} NineDServer;
 
 /* Global variables */
 extern IxpServer server;
 extern int debug;
 extern Ixp9Srv p9srv;
-extern Simple9pServer simple9p;
+extern NineDServer nined;
 
 /* Fid state structure to track open files */
 struct FidState {
@@ -53,7 +53,7 @@ struct FidState {
 void *s9_malloc(size_t size);
 char *s9_strdup(const char *string);
 void s9_free(void *pointer);
-#ifdef SIMPLE9P_TESTING
+#ifdef NINED_TESTING
 void s9_fail_allocation_after(long count);
 #endif
 
@@ -64,7 +64,7 @@ void fid_state_unregister(FidState *state);
 void fid_state_close(FidState *state);
 uint32_t qid_version(const struct stat *st);
 void qid_bump(void);
-void simple9p_state_cleanup(void);
+void nined_state_cleanup(void);
 void respond_errno(Ixp9Req *r, int error);
 uint32_t fs_read_count(const Ixp9Req *r);
 char *read_symlink_target(const ResolvedPath *path, size_t hint,
@@ -101,7 +101,7 @@ int build_stat(IxpStat *s, const char *path, const ResolvedPath *resolved,
                const char *symlink_target);
 int build_synthetic_stat(IxpStat *s, const char *name);
 void free_stat_strings(IxpStat *s);
-#ifdef SIMPLE9P_TESTING
+#ifdef NINED_TESTING
 int test_prepare_rename_updates(const char *old_path, const char *new_path);
 #endif
 

@@ -17,16 +17,16 @@ static void test_fid_allocation(void) {
 
     s9_fail_allocation_after(0);
     assert(fid_state_create("/") == NULL);
-    assert(simple9p.fids == NULL);
+    assert(nined.fids == NULL);
     s9_fail_allocation_after(1);
     assert(fid_state_create("/") == NULL);
-    assert(simple9p.fids == NULL);
+    assert(nined.fids == NULL);
     s9_fail_allocation_after(2);
     state = fid_state_create("/");
     assert(state != NULL);
-    assert(simple9p.fids == state);
+    assert(nined.fids == state);
     fid_state_destroy(state);
-    assert(simple9p.fids == NULL);
+    assert(nined.fids == NULL);
 }
 
 static void test_path_allocation(void) {
@@ -91,7 +91,7 @@ static void test_rename_allocations(void) {
     fid_state_destroy(other);
     fid_state_destroy(child);
     fid_state_destroy(parent);
-    assert(simple9p.fids == NULL);
+    assert(nined.fids == NULL);
 }
 
 static void test_qid_generation(void) {
@@ -103,13 +103,13 @@ static void test_qid_generation(void) {
     before = qid_version(&native);
     qid_bump();
     assert(qid_version(&native) != before);
-    simple9p_state_cleanup();
-    assert(simple9p.qid_generation == 0);
+    nined_state_cleanup();
+    assert(nined.qid_generation == 0);
     assert(qid_version(&native) == before);
 }
 
 int main(void) {
-    char template[] = "/tmp/simple9p-allocation-XXXXXX";
+    char template[] = "/tmp/nined-allocation-XXXXXX";
     char path[1024];
     char *root = mkdtemp(template);
     int descriptor;

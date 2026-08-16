@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef SIMPLE9P_TESTING
+#ifdef NINED_TESTING
 static long allocations_before_failure = -1;
 
 void s9_fail_allocation_after(long count) {

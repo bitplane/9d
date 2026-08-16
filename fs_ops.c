@@ -7,18 +7,18 @@
 #include <string.h>
 #include <unistd.h>
 
-Simple9pServer simple9p;
+NineDServer nined;
 
 uint32_t qid_version(const struct stat *st) {
-    return (uint32_t)st->st_mtime + simple9p.qid_generation;
+    return (uint32_t)st->st_mtime + nined.qid_generation;
 }
 
 void qid_bump(void) {
-    simple9p.qid_generation++;
+    nined.qid_generation++;
 }
 
-void simple9p_state_cleanup(void) {
-    simple9p.qid_generation = 0;
+void nined_state_cleanup(void) {
+    nined.qid_generation = 0;
 }
 
 void respond_errno(Ixp9Req *r, int error) {
@@ -65,7 +65,7 @@ static void set_qid(IxpQid *qid, const ResolvedPath *resolved,
     if(resolved->synthetic) {
         qid->type = P9_QTDIR;
         qid->path = namespace_root_qid();
-        qid->version = simple9p.qid_generation;
+        qid->version = nined.qid_generation;
         return;
     }
     qid->type = P9_QTFILE;
@@ -79,17 +79,17 @@ static void set_qid(IxpQid *qid, const ResolvedPath *resolved,
 
 void fid_state_register(FidState *state) {
     state->previous = NULL;
-    state->next = simple9p.fids;
+    state->next = nined.fids;
     if(state->next)
         state->next->previous = state;
-    simple9p.fids = state;
+    nined.fids = state;
 }
 
 void fid_state_unregister(FidState *state) {
     if(state->previous)
         state->previous->next = state->next;
-    else if(simple9p.fids == state)
-        simple9p.fids = state->next;
+    else if(nined.fids == state)
+        nined.fids = state->next;
     if(state->next)
         state->next->previous = state->previous;
     state->previous = NULL;

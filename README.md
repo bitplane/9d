@@ -21,12 +21,12 @@ build with `make NETWORK=0`.
 ## Usage
 
 ```text
-simple9p [-d] [-r] [-p address] [directory]
+9d [-d] [-r] [-p address] [directory]
 ```
 
 Use `-r` for read only.
 
-Without a dir, simple9p serves the platform's filesystem root: `/` on
+Without a dir, 9d serves the platform's filesystem root: `/` on
 Unix-like systems, or a path above the volumes elsewhere.
 
 The default address for a network server is `tcp!localhost!564`.

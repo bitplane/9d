@@ -1,3 +1,3 @@
 LIBIXP_URL=https://github.com/bitplane/libixp.git
-LIBIXP_REF=simple9p-0.3
-LIBIXP_COMMIT=8d1fe8fcdcfd7c6ad500c6cdceb3a4e42847a15c
+LIBIXP_REF=9d-20260817
+LIBIXP_COMMIT=4a7d30fd5ae3383568468f745c267ef12f562695

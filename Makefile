@@ -28,16 +28,16 @@ endif
 
 NETWORK ?= 1
 ifeq ($(NETWORK),0)
-CPPFLAGS += -DSIMPLE9P_NO_NETWORK
+CPPFLAGS += -DNINED_NO_NETWORK
 else ifneq ($(NETWORK),1)
 $(error NETWORK must be 0 or 1)
 endif
 
 PLATFORM ?= posix
-SRCS = simple9p.c alloc.c path.c namespace.c platform_$(PLATFORM).c \
+SRCS = 9d.c alloc.c path.c namespace.c platform_$(PLATFORM).c \
 	fs_ops.c fs_io.c fs_stat.c fs_dir.c
 OBJS = $(patsubst %.c,build/%.o,$(SRCS))
-TARGET = build/simple9p
+TARGET = build/9d
 LIBIXP_NAMES = convert error map message request server transport util timer \
 	thread
 ifeq ($(NETWORK),1)
@@ -111,8 +111,8 @@ test-build-options:
 test-namespace: build/namespace_test
 	./build/namespace_test
 
-test-protocol: build/protocol_test build/simple9p build/simple9p-synthetic
-	./build/protocol_test ./build/simple9p ./build/simple9p-synthetic
+test-protocol: build/protocol_test build/9d build/9d-synthetic
+	./build/protocol_test ./build/9d ./build/9d-synthetic
 
 test-allocations: build/allocation_test
 	./build/allocation_test
@@ -146,7 +146,7 @@ build/protocol_test: test/protocol_test.c build/libixp.a | build
 
 build/allocation_test: test/allocation_test.c alloc.c path.c namespace.c \
 		platform_posix.c fs_ops.c fs_stat.c build/libixp.a | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DSIMPLE9P_TESTING -o $@ \
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DNINED_TESTING -o $@ \
 		test/allocation_test.c alloc.c path.c namespace.c platform_posix.c \
 		fs_ops.c fs_stat.c $(LIBS)
 
@@ -156,11 +156,11 @@ build/platform_posix-synthetic.o: platform_posix.c platform.h namespace.h | buil
 		-Dplatform_remove=platform_remove_native \
 		-c platform_posix.c -o $@
 
-build/simple9p-synthetic: simple9p.c alloc.c path.c namespace.c \
+build/9d-synthetic: 9d.c alloc.c path.c namespace.c \
 		test/platform_synthetic.c fs_ops.c fs_io.c fs_stat.c fs_dir.c \
 		server.h namespace.h build/platform_posix-synthetic.o build/libixp.a | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ \
-		simple9p.c alloc.c path.c namespace.c test/platform_synthetic.c \
+		9d.c alloc.c path.c namespace.c test/platform_synthetic.c \
 		fs_ops.c fs_io.c fs_stat.c fs_dir.c \
 		build/platform_posix-synthetic.o $(LIBS)
 

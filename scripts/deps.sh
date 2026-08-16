@@ -13,8 +13,8 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-if [ -f "$destination/.simple9p-commit" ]; then
-    actual=$(sed -n '1p' "$destination/.simple9p-commit")
+if [ -f "$destination/.9d-commit" ]; then
+    actual=$(sed -n '1p' "$destination/.9d-commit")
     if [ "$actual" != "$LIBIXP_COMMIT" ]; then
         echo "Vendored libixp is $actual, expected $LIBIXP_COMMIT" >&2
         exit 1
