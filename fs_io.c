@@ -56,9 +56,12 @@ static int open_flags(uint8_t mode, int *flags) {
 
 uint32_t fs_read_count(const Ixp9Req *r) {
     uint32_t count = r->ifcall.tread.count;
+    uint32_t limit = IXP_MAX_MSG - 24U;
 
-    if(r->fid->iounit && count > r->fid->iounit)
-        count = r->fid->iounit;
+    if(r->fid->iounit && limit > r->fid->iounit)
+        limit = r->fid->iounit;
+    if(count > limit)
+        count = limit;
     return count;
 }
 

@@ -292,6 +292,11 @@ void fs_wstat(Ixp9Req *r) {
         respond_errno(r, EOPNOTSUPP);
         return;
     }
+    if(S_ISLNK(original.st_mode) &&
+       (change_length || change_mode || change_atime || change_mtime)) {
+        respond_errno(r, EOPNOTSUPP);
+        return;
+    }
     if(change_name && (change_length || change_mode || change_atime ||
                        change_mtime)) {
         respond_errno(r, EINVAL);
