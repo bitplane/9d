@@ -2,7 +2,7 @@
 
 A smallish (<1MB) 9p server that can be static linked in busybox images.
 
-Built for [Mountin](https://github.com/bitplane/mountin)
+Built for [mountin](https://github.com/bitplane/mountin)
 
 Uses [libixp](https://github.com/0intro/libixp)
 
