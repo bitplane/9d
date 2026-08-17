@@ -771,8 +771,11 @@ static void test_wstat_validation(Client *client, const char *root) {
     const char *name[] = { "metadata" };
     IxpFcall response;
     IxpStat stat;
+    struct stat before;
     struct stat native;
     char path[1024];
+    char data[8] = {0};
+    int fd;
 
     response = walk(client, 1, 70, name, 1);
     expect_type("walk metadata", &response, P9_RWalk);
@@ -781,16 +784,36 @@ static void test_wstat_validation(Client *client, const char *root) {
     stat.mode = 0640;
     stat.atime = 1000000000;
     stat.mtime = 1000000001;
-    stat.length = 4;
     response = wstat_fid(client, 70, &stat);
     expect_type("combined metadata wstat", &response, P9_RWStat);
     ixp_freefcall(&response);
     make_path(path, sizeof(path), root, "metadata");
     assert(lstat(path, &native) == 0);
     assert((native.st_mode & 0777) == 0640);
-    assert(native.st_size == 4);
+    assert(native.st_size == 8);
     assert(native.st_atime == 1000000000);
     assert(native.st_mtime == 1000000001);
+
+    before = native;
+    stat = unchanged_stat();
+    stat.length = 4;
+    stat.mode = 0600;
+    stat.mtime = 1000000002;
+    response = wstat_fid(client, 70, &stat);
+    expect_error("truncate combined with metadata", &response, EINVAL);
+    ixp_freefcall(&response);
+    assert(lstat(path, &native) == 0);
+    assert(native.st_size == before.st_size);
+    assert((native.st_mode & 0777) == (before.st_mode & 0777));
+    assert(native.st_atime == before.st_atime);
+    assert(native.st_mtime == before.st_mtime);
+
+    stat = unchanged_stat();
+    stat.length = 4;
+    response = wstat_fid(client, 70, &stat);
+    expect_type("standalone truncate wstat", &response, P9_RWStat);
+    ixp_freefcall(&response);
+    assert(lstat(path, &native) == 0 && native.st_size == 4);
 
     stat = unchanged_stat();
     stat.uid = "someone";
@@ -800,13 +823,28 @@ static void test_wstat_validation(Client *client, const char *root) {
     ixp_freefcall(&response);
     assert(lstat(path, &native) == 0 && native.st_size == 4);
 
+    assert(lstat(path, &before) == 0);
     stat = unchanged_stat();
     stat.name = "metadata-renamed";
     stat.length = 1;
+    stat.mode = 0600;
+    stat.mtime = 1000000002;
     response = wstat_fid(client, 70, &stat);
-    expect_type("rename combined with mutation", &response, P9_RError);
+    expect_error("rename combined with mutation", &response, EINVAL);
     ixp_freefcall(&response);
-    assert(lstat(path, &native) == 0 && native.st_size == 4);
+    assert(lstat(path, &native) == 0);
+    assert(native.st_size == before.st_size);
+    assert((native.st_mode & 0777) == (before.st_mode & 0777));
+    assert(native.st_atime == before.st_atime);
+    assert(native.st_mtime == before.st_mtime);
+    make_path(path, sizeof(path), root, "metadata-renamed");
+    assert(access(path, F_OK) < 0 && errno == ENOENT);
+    make_path(path, sizeof(path), root, "metadata");
+    fd = open(path, O_RDONLY);
+    assert(fd >= 0);
+    assert(read(fd, data, sizeof(data)) == 4);
+    assert(memcmp(data, "meta", 4) == 0);
+    assert(close(fd) == 0);
 }
 
 static void test_create_validation(Client *client, const char *root) {
@@ -1008,6 +1046,7 @@ static void test_partial_wstat_qid(Client *client, const char *root) {
     IxpQid before;
     IxpQid after;
     char path[1024];
+    char data[32] = {0};
 
     response = walk(client, 1, 122, name, 1);
     expect_type("walk partial wstat file", &response, P9_RWalk);
@@ -1023,10 +1062,17 @@ static void test_partial_wstat_qid(Client *client, const char *root) {
     stat.length = 2;
     stat.mtime = 1000000002;
     response = wstat_fid(client, 122, &stat);
-    expect_error("partially applied wstat", &response, ENOENT);
+    expect_error("reject compound truncate wstat", &response, EINVAL);
     ixp_freefcall(&response);
     after = stat_qid(client, 122);
-    assert(after.version != before.version);
+    assert(after.version == before.version);
+    response = read_fid(client, 122, 0, sizeof(data));
+    expect_type("compound truncate leaves data unchanged", &response,
+                P9_RRead);
+    assert(response.rread.count == strlen("partial-wstat"));
+    assert(memcmp(response.rread.data, "partial-wstat",
+                  response.rread.count) == 0);
+    ixp_freefcall(&response);
 }
 
 static void test_read_only(const char *binary, const char *root) {

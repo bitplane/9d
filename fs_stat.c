@@ -302,6 +302,10 @@ void fs_wstat(Ixp9Req *r) {
         respond_errno(r, EINVAL);
         return;
     }
+    if(change_length && (change_mode || change_atime || change_mtime)) {
+        respond_errno(r, EINVAL);
+        return;
+    }
     if(change_name && !namespace_valid_component(requested->name)) {
         respond_errno(r, EINVAL);
         return;
@@ -400,9 +404,12 @@ void fs_wstat(Ixp9Req *r) {
         time_t mtime = change_mtime ? requested->mtime : original.st_mtime;
         if(platform_set_times(&resolved, atime, mtime) < 0) {
             int error = errno;
-            if(change_mode)
-                platform_chmod(&resolved, original.st_mode & 0777);
-            if(mutated)
+            int rollback_failed = change_mode &&
+                (state->fd >= 0 ? fchmod(state->fd,
+                                          original.st_mode & 0777)
+                                : platform_chmod(&resolved,
+                                                 original.st_mode & 0777)) < 0;
+            if(rollback_failed)
                 qid_bump();
             respond_errno(r, error);
             return;
