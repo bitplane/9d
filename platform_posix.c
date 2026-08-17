@@ -16,6 +16,10 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#ifdef S9_NO_DUPFD_CLOEXEC
+#undef F_DUPFD_CLOEXEC
+#endif
+
 static int native_root = -1;
 static int *synthetic_roots;
 static size_t synthetic_root_count;
@@ -72,11 +76,22 @@ int platform_namespace_ready(Namespace *ns) {
 static int root_descriptor(const ResolvedPath *path) {
     int root = namespace.synthetic ? synthetic_roots[path->root_index]
                                    : native_root;
-    int descriptor = dup(root);
 
-    if(descriptor >= 0)
-        fcntl(descriptor, F_SETFD, FD_CLOEXEC);
-    return descriptor;
+#ifdef F_DUPFD_CLOEXEC
+    return fcntl(root, F_DUPFD_CLOEXEC, 0);
+#else
+    {
+        int descriptor = dup(root);
+
+        if(descriptor >= 0 && fcntl(descriptor, F_SETFD, FD_CLOEXEC) < 0) {
+            int error = errno;
+            close(descriptor);
+            errno = error;
+            return -1;
+        }
+        return descriptor;
+    }
+#endif
 }
 
 static int open_parent(const ResolvedPath *path, char *leaf,
