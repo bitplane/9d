@@ -18,6 +18,7 @@ void qid_bump(void) {
 }
 
 void nined_state_cleanup(void) {
+    nined.fid_count = 0;
     nined.qid_generation = 0;
 }
 
@@ -83,9 +84,12 @@ void fid_state_register(FidState *state) {
     if(state->next)
         state->next->previous = state;
     nined.fids = state;
+    nined.fid_count++;
 }
 
 void fid_state_unregister(FidState *state) {
+    int registered = state->previous || state->next || nined.fids == state;
+
     if(state->previous)
         state->previous->next = state->next;
     else if(nined.fids == state)
@@ -94,6 +98,8 @@ void fid_state_unregister(FidState *state) {
         state->next->previous = state->previous;
     state->previous = NULL;
     state->next = NULL;
+    if(registered)
+        nined.fid_count--;
 }
 
 void fid_state_close(FidState *state) {
@@ -122,6 +128,10 @@ void fid_state_close(FidState *state) {
 FidState *fid_state_create(const char *path) {
     FidState *state;
 
+    if(nined.fid_count >= S9_MAX_FIDS) {
+        errno = EMFILE;
+        return NULL;
+    }
     state = s9_malloc(sizeof(*state));
     if(!state)
         return NULL;
@@ -152,7 +162,7 @@ void fs_attach(Ixp9Req *r) {
 
     state = fid_state_create("/");
     if(!state) {
-        respond_errno(r, ENOMEM);
+        respond_errno(r, errno);
         return;
     }
     if(namespace_resolve("/", &resolved) < 0 ||
@@ -235,8 +245,9 @@ void fs_walk(Ixp9Req *r) {
         } else {
             FidState *newstate = fid_state_create(candidate);
             if(!newstate) {
+                int error = errno;
                 s9_free(candidate);
-                respond_errno(r, ENOMEM);
+                respond_errno(r, error);
                 return;
             }
             r->newfid->aux = newstate;

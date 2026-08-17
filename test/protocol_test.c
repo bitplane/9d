@@ -484,6 +484,26 @@ static void test_libixp_fid_cleanup(Client *client) {
     ixp_freefcall(&response);
 }
 
+static void test_fid_limit(Client *client) {
+    IxpFcall response;
+    uint32_t index;
+
+    for(index = 0; index < S9_MAX_FIDS - 1; index++) {
+        response = walk(client, 1, 1000 + index, NULL, 0);
+        expect_type("clone fid below limit", &response, P9_RWalk);
+        ixp_freefcall(&response);
+    }
+    response = walk(client, 1, 1000 + index, NULL, 0);
+    expect_error("reject fid above limit", &response, EMFILE);
+    ixp_freefcall(&response);
+    while(index > 0) {
+        index--;
+        response = clunk(client, 1000 + index);
+        expect_type("clunk bounded fid", &response, P9_RClunk);
+        ixp_freefcall(&response);
+    }
+}
+
 static void test_rename_and_open_identity(Client *client, const char *root) {
     const char *file[] = { "dir", "file" };
     IxpFcall response;
@@ -1238,6 +1258,7 @@ int main(int argc, char **argv) {
     test_response_pack_failure(argv[1], root);
     child = start_server(argv[1], root, &client);
     test_libixp_fid_cleanup(&client);
+    test_fid_limit(&client);
     test_walks(&client);
     test_rename_and_open_identity(&client, root);
     test_truncate_and_symlink(&client, root);

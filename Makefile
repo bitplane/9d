@@ -18,6 +18,8 @@ SANITIZER_FLAGS = -g -O1 -fno-omit-frame-pointer \
 	-fsanitize=address,undefined
 RELEASE_CFLAGS ?= -Os -DNDEBUG
 EMBEDDED_PATH_MAX ?= 1024
+MAX_FIDS ?= 1024
+CPPFLAGS += -DS9_MAX_FIDS=$(MAX_FIDS)
 
 STATIC ?= 1
 ifeq ($(STATIC),1)

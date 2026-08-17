@@ -25,8 +25,29 @@ static void test_fid_allocation(void) {
     state = fid_state_create("/");
     assert(state != NULL);
     assert(nined.fids == state);
+    assert(nined.fid_count == 1);
     fid_state_destroy(state);
     assert(nined.fids == NULL);
+    assert(nined.fid_count == 0);
+}
+
+static void test_fid_limit(void) {
+    FidState *states[S9_MAX_FIDS];
+    size_t index;
+
+    s9_fail_allocation_after(-1);
+    for(index = 0; index < S9_MAX_FIDS; index++) {
+        states[index] = fid_state_create("/");
+        assert(states[index] != NULL);
+    }
+    errno = 0;
+    assert(fid_state_create("/") == NULL);
+    assert(errno == EMFILE);
+    assert(nined.fid_count == S9_MAX_FIDS);
+    while(index > 0)
+        fid_state_destroy(states[--index]);
+    assert(nined.fids == NULL);
+    assert(nined.fid_count == 0);
 }
 
 static void test_path_allocation(void) {
@@ -120,6 +141,7 @@ int main(void) {
     assert(descriptor >= 0);
     assert(close(descriptor) == 0);
     test_fid_allocation();
+    test_fid_limit();
     test_path_allocation();
     test_stat_allocations(root);
     test_rename_allocations();

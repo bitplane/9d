@@ -10,6 +10,9 @@
 
 #define nil NULL
 #define S9_DIR_CHECKPOINTS 16
+#ifndef S9_MAX_FIDS
+#define S9_MAX_FIDS 1024
+#endif
 
 typedef struct FidState FidState;
 
@@ -20,6 +23,7 @@ typedef struct DirCheckpoint {
 
 typedef struct NineDServer {
     FidState *fids;
+    size_t fid_count;
     uint32_t qid_generation;
     int read_only;
 } NineDServer;
