@@ -1,4 +1,4 @@
-# A simple 9p server
+# 🪙 9d - an embeddable 9p server
 
 A smallish (<1MB) 9p server that can be static linked in busybox images.
 
@@ -44,4 +44,4 @@ WTFPL with one additional clause:
 
 * Don't blame me.
 
-Do wtf you like, but you get what you pay for.
+Do what you want, but you get what you pay for.
