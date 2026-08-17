@@ -1,3 +1,4 @@
 build
 dist
 libixp
+test/tests/9dtest_*/
