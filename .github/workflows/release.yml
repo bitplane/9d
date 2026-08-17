@@ -27,9 +27,9 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           work=$(mktemp -d)
-          tar -C "$work" -xf "dist/simple9p-$version.tar.xz"
-          test ! -e "$work/simple9p-$version/libixp/.git"
-          make -C "$work/simple9p-$version" release
+          tar -C "$work" -xf "dist/9d-$version.tar.xz"
+          test ! -e "$work/9d-$version/libixp/.git"
+          make -C "$work/9d-$version" release
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
