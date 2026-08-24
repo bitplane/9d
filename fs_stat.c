@@ -69,7 +69,7 @@ int build_synthetic_stat(IxpStat *s, const char *name) {
     memset(s, 0, sizeof(*s));
     s->qid.type = P9_QTDIR;
     s->qid.path = namespace_root_qid();
-    s->qid.version = nined.qid_generation;
+    s->qid.version = namespace.generation;
     s->mode = P9_DMDIR | 0555;
     s->name = s9_strdup(name);
     s->uid = s9_strdup("none");

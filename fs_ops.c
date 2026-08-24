@@ -66,7 +66,7 @@ static void set_qid(IxpQid *qid, const ResolvedPath *resolved,
     if(resolved->synthetic) {
         qid->type = P9_QTDIR;
         qid->path = namespace_root_qid();
-        qid->version = nined.qid_generation;
+        qid->version = namespace.generation;
         return;
     }
     qid->type = P9_QTFILE;
@@ -113,6 +113,10 @@ void fid_state_close(FidState *state) {
         closedir(state->dir);
         state->dir = NULL;
     }
+    namespace_free_roots(state->namespace_roots,
+                         state->namespace_root_count);
+    state->namespace_roots = NULL;
+    state->namespace_root_count = 0;
     s9_free(state->symlink);
     state->symlink = NULL;
     state->symlink_length = 0;

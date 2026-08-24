@@ -44,6 +44,8 @@ struct FidState {
     char *symlink;
     size_t symlink_length;
     uint64_t dir_offset;
+    NamespaceRoot *namespace_roots;
+    size_t namespace_root_count;
     DirCheckpoint checkpoints[S9_DIR_CHECKPOINTS];
     size_t checkpoint_count;
     size_t checkpoint_next;

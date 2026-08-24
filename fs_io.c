@@ -169,15 +169,13 @@ void fs_open(Ixp9Req *r) {
     }
 
     fid_state_close(state);
-    if(resolved.synthetic) {
-        /* The synthetic namespace is enumerated from its immutable root list. */
-    } else if(S_ISDIR(st.st_mode)) {
+    if(!resolved.synthetic && S_ISDIR(st.st_mode)) {
         state->dir = platform_opendir(&resolved);
         if(!state->dir) {
             respond_errno(r, errno);
             return;
         }
-    } else if(S_ISLNK(st.st_mode)) {
+    } else if(!resolved.synthetic && S_ISLNK(st.st_mode)) {
         if((r->ifcall.topen.mode & 3) != P9_OREAD) {
             respond_errno(r, EACCES);
             return;
@@ -189,7 +187,7 @@ void fs_open(Ixp9Req *r) {
             respond_errno(r, errno);
             return;
         }
-    } else if(S_ISREG(st.st_mode)) {
+    } else if(!resolved.synthetic && S_ISREG(st.st_mode)) {
         state->fd = platform_open(&resolved, flags, 0);
         if(state->fd < 0) {
             respond_errno(r, errno);
@@ -204,7 +202,7 @@ void fs_open(Ixp9Req *r) {
                 return;
             }
         }
-    } else {
+    } else if(!resolved.synthetic) {
         respond_errno(r, EOPNOTSUPP);
         return;
     }
@@ -218,7 +216,8 @@ void fs_open(Ixp9Req *r) {
                        S_ISLNK(st.st_mode) ? P9_QTSYMLINK : P9_QTFILE;
     r->fid->qid.path = resolved.synthetic ? namespace_root_qid()
                                            : namespace_qid(&resolved, &st);
-    r->fid->qid.version = qid_version(&st);
+    r->fid->qid.version = resolved.synthetic ? namespace.generation
+                                             : qid_version(&st);
     r->ofcall.ropen.qid = r->fid->qid;
     ixp_respond(r, nil);
 }

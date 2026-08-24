@@ -21,61 +21,31 @@
 #endif
 
 static int native_root = -1;
-static int *synthetic_roots;
-static size_t synthetic_root_count;
 
 void platform_namespace_cleanup(Namespace *ns) {
-    size_t index;
-
     (void)ns;
     if(native_root >= 0) {
         close(native_root);
         native_root = -1;
     }
-    for(index = 0; index < synthetic_root_count; index++) {
-        if(synthetic_roots[index] >= 0)
-            close(synthetic_roots[index]);
-    }
-    free(synthetic_roots);
-    synthetic_roots = NULL;
-    synthetic_root_count = 0;
 }
 
 int platform_namespace_ready(Namespace *ns) {
-    size_t index;
-
     platform_namespace_cleanup(ns);
     if(!ns->synthetic) {
         native_root = open(ns->native_root,
                            O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         return native_root < 0 ? -1 : 0;
     }
-    if(!ns->nroots)
-        return 0;
-    synthetic_roots = malloc(ns->nroots * sizeof(*synthetic_roots));
-    if(!synthetic_roots) {
-        errno = ENOMEM;
-        return -1;
-    }
-    synthetic_root_count = ns->nroots;
-    for(index = 0; index < synthetic_root_count; index++)
-        synthetic_roots[index] = -1;
-    for(index = 0; index < ns->nroots; index++) {
-        synthetic_roots[index] = open(ns->roots[index].path,
-                                      O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        if(synthetic_roots[index] < 0) {
-            int error = errno;
-            platform_namespace_cleanup(ns);
-            errno = error;
-            return -1;
-        }
-    }
     return 0;
 }
 
 static int root_descriptor(const ResolvedPath *path) {
-    int root = namespace.synthetic ? synthetic_roots[path->root_index]
-                                   : native_root;
+    int root;
+
+    if(namespace.synthetic)
+        return open(path->root_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    root = native_root;
 
 #ifdef F_DUPFD_CLOEXEC
     return fcntl(root, F_DUPFD_CLOEXEC, 0);
@@ -351,4 +321,9 @@ int platform_truncate(const ResolvedPath *path, off_t length) {
 
 int platform_namespace_init(Namespace *ns) {
     return namespace_use_native(ns, "/");
+}
+
+int platform_namespace_discover(Namespace *ns) {
+    (void)ns;
+    return 0;
 }

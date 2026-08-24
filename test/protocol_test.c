@@ -252,6 +252,44 @@ static void write_file(const char *path, const char *data) {
     assert(close(fd) == 0);
 }
 
+static void write_roots(const char *path, const char **names,
+                        const char **roots, size_t count) {
+    FILE *file = fopen(path, "w");
+    size_t index;
+
+    assert(file);
+    for(index = 0; index < count; index++)
+        assert(fprintf(file, "%s\t%s\n", names[index], roots[index]) > 0);
+    assert(fclose(file) == 0);
+}
+
+static size_t directory_names(Client *client, IxpFcall *response,
+                              const char **expected, size_t expected_count) {
+    IxpMsg message;
+    size_t count = 0;
+    size_t first_length = 0;
+
+    expect_type("directory listing", response, P9_RRead);
+    message = ixp_message(response->rread.data, response->rread.count,
+                          MsgUnpack);
+    message.version = client->version;
+    while(message.pos < message.end) {
+        IxpStat stat = {0};
+        char *before = message.pos;
+
+        ixp_pstat(&message, &stat);
+        assert(message.pos > before);
+        if(count == 0)
+            first_length = (size_t)(message.pos - before);
+        assert(count < expected_count);
+        assert(strcmp(stat.name, expected[count]) == 0);
+        count++;
+        ixp_freestat(&stat);
+    }
+    assert(count == expected_count);
+    return first_length;
+}
+
 static void write_pattern_file(const char *path, size_t length) {
     char buffer[1024];
     size_t written = 0;
@@ -1146,18 +1184,99 @@ static void test_read_only(const char *binary, const char *root) {
 
 static void test_synthetic_namespace(const char *binary,
                                      const char *first_root,
-                                     const char *second_root) {
+                                     const char *second_root,
+                                     const char *roots_file) {
     const char *first[] = { "First" };
+    const char *second_file[] = { "Second", "persistent" };
     const char *created[] = { "created" };
+    const char *initial_names[] = { "Second", "First" };
+    const char *initial_roots[] = { second_root, first_root };
+    const char *changed_names[] = { "Third", "First" };
+    const char *changed_roots[] = { second_root, first_root };
+    const char *reordered_roots[] = { first_root, second_root };
+    const char *first_page[] = { "First" };
+    const char *initial_listing[] = { "First", "Second" };
+    const char *changed_listing[] = { "First", "Third" };
     IxpFcall response;
     IxpStat stat;
+    IxpQid before;
+    IxpQid after;
     Client client;
     pid_t child;
+    size_t first_length;
     char path[1024];
 
-    assert(setenv("NINED_TEST_ROOT_1", first_root, 1) == 0);
-    assert(setenv("NINED_TEST_ROOT_2", second_root, 1) == 0);
+    write_roots(roots_file, NULL, NULL, 0);
+    assert(setenv("NINED_TEST_ROOTS", roots_file, 1) == 0);
     child = start_server(binary, NULL, &client);
+
+    attach(&client, 299);
+    response = open_fid(&client, 299, P9_OREAD);
+    expect_type("open synthetic root", &response, P9_ROpen);
+    ixp_freefcall(&response);
+    response = read_fid(&client, 299, 0, 8192);
+    directory_names(&client, &response, NULL, 0);
+    ixp_freefcall(&response);
+
+    before = stat_qid(&client, 299);
+    write_roots(roots_file, initial_names, initial_roots, 2);
+    response = read_fid(&client, 299, 0, 8192);
+    first_length = directory_names(&client, &response, initial_listing, 2);
+    ixp_freefcall(&response);
+    after = stat_qid(&client, 299);
+    assert(after.version != before.version);
+
+    response = read_fid(&client, 299, 0, (uint32_t)first_length);
+    directory_names(&client, &response, first_page, 1);
+    ixp_freefcall(&response);
+
+    response = walk(&client, 1, 305, second_file, 2);
+    expect_type("walk file before volume removal", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = open_fid(&client, 305, P9_OREAD);
+    expect_type("open file before volume removal", &response, P9_ROpen);
+    ixp_freefcall(&response);
+
+    response = walk(&client, 1, 306, NULL, 0);
+    expect_type("clone root for refresh", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = open_fid(&client, 306, P9_OREAD);
+    expect_type("open second synthetic root fid", &response, P9_ROpen);
+    ixp_freefcall(&response);
+    write_roots(roots_file, changed_names, changed_roots, 2);
+    response = read_fid(&client, 306, 0, 8192);
+    directory_names(&client, &response, changed_listing, 2);
+    ixp_freefcall(&response);
+
+    response = read_fid(&client, 299, first_length, 8192);
+    directory_names(&client, &response, &initial_listing[1], 1);
+    ixp_freefcall(&response);
+    response = read_fid(&client, 305, 0, 32);
+    expect_type("open file survives volume removal", &response, P9_RRead);
+    assert(response.rread.count == strlen("persistent"));
+    assert(memcmp(response.rread.data, "persistent",
+                  response.rread.count) == 0);
+    ixp_freefcall(&response);
+    response = walk(&client, 1, 307, second_file, 1);
+    expect_error("removed volume rejects new walk", &response, ENOENT);
+    ixp_freefcall(&response);
+
+    before = stat_qid(&client, 299);
+    write_roots(roots_file, changed_listing, reordered_roots, 2);
+    response = read_fid(&client, 306, 0, 8192);
+    directory_names(&client, &response, changed_listing, 2);
+    ixp_freefcall(&response);
+    after = stat_qid(&client, 299);
+    assert(after.version == before.version);
+
+    assert(unlink(roots_file) == 0);
+    response = read_fid(&client, 306, 0, 8192);
+    expect_error("failed discovery preserves namespace", &response, ENOENT);
+    ixp_freefcall(&response);
+    response = walk(&client, 1, 308, first, 1);
+    expect_type("walk preserved root after discovery failure", &response,
+                P9_RWalk);
+    ixp_freefcall(&response);
 
     stat = unchanged_stat();
     response = wstat_fid(&client, 1, &stat);
@@ -1217,8 +1336,7 @@ static void test_synthetic_namespace(const char *binary,
     expect_error("protect synthetic root listing", &response, EPERM);
     ixp_freefcall(&response);
     stop_server(&client, child);
-    unsetenv("NINED_TEST_ROOT_1");
-    unsetenv("NINED_TEST_ROOT_2");
+    unsetenv("NINED_TEST_ROOTS");
 
     make_path(path, sizeof(path), first_root, "created");
     assert(access(path, F_OK) < 0 && errno == ENOENT);
@@ -1229,12 +1347,14 @@ int main(int argc, char **argv) {
     char outside_template[] = "/tmp/9d-outside-XXXXXX";
     char first_template[] = "/tmp/9d-first-XXXXXX";
     char second_template[] = "/tmp/9d-second-XXXXXX";
+    char roots_template[] = "/tmp/9d-roots-XXXXXX";
     char path[1024];
     char second[1024];
     char *root;
     char *outside;
     char *first_root;
     char *second_root;
+    int roots_fd;
     Client client;
     pid_t child;
     unsigned int index;
@@ -1248,6 +1368,9 @@ int main(int argc, char **argv) {
     assert(first_root);
     second_root = mkdtemp(second_template);
     assert(second_root);
+    roots_fd = mkstemp(roots_template);
+    assert(roots_fd >= 0);
+    assert(close(roots_fd) == 0);
     make_path(path, sizeof(path), root, "dir");
     assert(mkdir(path, 0700) == 0);
     make_path(path, sizeof(path), root, "dir/file");
@@ -1297,6 +1420,8 @@ int main(int argc, char **argv) {
     assert(chmod(path, 0644) == 0);
     make_path(path, sizeof(path), outside, "secret");
     write_file(path, "outside");
+    make_path(path, sizeof(path), second_root, "persistent");
+    write_file(path, "persistent");
     make_path(path, sizeof(path), root, "escape");
     assert(symlink(outside, path) == 0);
 
@@ -1321,7 +1446,8 @@ int main(int argc, char **argv) {
     stop_server(&client, child);
     test_read_only(argv[1], root);
     if(argc == 3)
-        test_synthetic_namespace(argv[2], first_root, second_root);
+        test_synthetic_namespace(argv[2], first_root, second_root,
+                                 roots_template);
 
     make_path(path, sizeof(path), root, "entries");
     for(index = 0; index < 32; index++) {
@@ -1350,6 +1476,7 @@ int main(int argc, char **argv) {
     make_path(path, sizeof(path), outside, "secret"); unlink(path);
     assert(rmdir(outside) == 0);
     assert(rmdir(first_root) == 0);
+    make_path(path, sizeof(path), second_root, "persistent"); unlink(path);
     assert(rmdir(second_root) == 0);
     puts("protocol tests passed");
     return 0;

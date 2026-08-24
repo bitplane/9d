@@ -20,6 +20,27 @@ static uint64_t hash_u64(uint64_t hash, uint64_t value) {
     return hash;
 }
 
+static uint64_t hash_string(const char *string) {
+    uint64_t hash = UINT64_C(1469598103934665603);
+    const unsigned char *p = (const unsigned char *)string;
+
+    while(*p) {
+        hash ^= *p++;
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash ? hash : UINT64_MAX;
+}
+
+void namespace_free_roots(NamespaceRoot *roots, size_t count) {
+    size_t i;
+
+    for(i = 0; i < count; i++) {
+        free(roots[i].name);
+        free(roots[i].path);
+    }
+    free(roots);
+}
+
 static int encode_name(const char *name, char *encoded, size_t size) {
     static const char hex[] = "0123456789ABCDEF";
     size_t used = 0;
@@ -47,15 +68,9 @@ static int encode_name(const char *name, char *encoded, size_t size) {
 }
 
 void namespace_cleanup(void) {
-    size_t i;
-
     platform_namespace_cleanup(&namespace);
     free(namespace.native_root);
-    for(i = 0; i < namespace.nroots; i++) {
-        free(namespace.roots[i].name);
-        free(namespace.roots[i].path);
-    }
-    free(namespace.roots);
+    namespace_free_roots(namespace.roots, namespace.nroots);
     memset(&namespace, 0, sizeof(namespace));
 }
 
@@ -84,12 +99,18 @@ int namespace_add_root(Namespace *ns, const char *name, const char *path) {
     char encoded[S9_PATH_MAX];
     char *name_copy;
     char *path_copy;
+    uint64_t id;
     size_t i;
 
     if(!ns || !ns->synthetic || encode_name(name, encoded, sizeof(encoded)) < 0)
         return -1;
+    id = hash_string(encoded);
     for(i = 0; i < ns->nroots; i++) {
         if(strcmp(ns->roots[i].name, encoded) == 0) {
+            errno = EEXIST;
+            return -1;
+        }
+        if(ns->roots[i].id == id) {
             errno = EEXIST;
             return -1;
         }
@@ -112,8 +133,86 @@ int namespace_add_root(Namespace *ns, const char *name, const char *path) {
     ns->roots = roots;
     ns->roots[ns->nroots].name = name_copy;
     ns->roots[ns->nroots].path = path_copy;
-    ns->roots[ns->nroots].id = ns->nroots + 1;
+    ns->roots[ns->nroots].id = id;
     ns->nroots++;
+    return 0;
+}
+
+static int compare_roots(const void *left, const void *right) {
+    const NamespaceRoot *a = left;
+    const NamespaceRoot *b = right;
+    int result = strcmp(a->name, b->name);
+
+    return result ? result : strcmp(a->path, b->path);
+}
+
+static int roots_equal(const Namespace *left, const Namespace *right) {
+    size_t i;
+
+    if(left->nroots != right->nroots)
+        return 0;
+    for(i = 0; i < left->nroots; i++) {
+        if(strcmp(left->roots[i].name, right->roots[i].name) != 0 ||
+           strcmp(left->roots[i].path, right->roots[i].path) != 0)
+            return 0;
+    }
+    return 1;
+}
+
+int namespace_refresh(void) {
+    Namespace candidate;
+
+    if(!namespace.synthetic)
+        return 0;
+    memset(&candidate, 0, sizeof(candidate));
+    candidate.synthetic = 1;
+    if(platform_namespace_discover(&candidate) < 0) {
+        namespace_free_roots(candidate.roots, candidate.nroots);
+        return -1;
+    }
+    if(candidate.nroots > 1)
+        qsort(candidate.roots, candidate.nroots, sizeof(*candidate.roots),
+              compare_roots);
+    if(roots_equal(&namespace, &candidate)) {
+        namespace_free_roots(candidate.roots, candidate.nroots);
+        return 0;
+    }
+    namespace_free_roots(namespace.roots, namespace.nroots);
+    namespace.roots = candidate.roots;
+    namespace.nroots = candidate.nroots;
+    namespace.generation++;
+    return 0;
+}
+
+int namespace_copy_roots(NamespaceRoot **roots, size_t *count) {
+    NamespaceRoot *copy;
+    size_t i;
+
+    if(!roots || !count) {
+        errno = EINVAL;
+        return -1;
+    }
+    *roots = NULL;
+    *count = 0;
+    if(!namespace.nroots)
+        return 0;
+    copy = calloc(namespace.nroots, sizeof(*copy));
+    if(!copy) {
+        errno = ENOMEM;
+        return -1;
+    }
+    for(i = 0; i < namespace.nroots; i++) {
+        copy[i].name = strdup(namespace.roots[i].name);
+        copy[i].path = strdup(namespace.roots[i].path);
+        copy[i].id = namespace.roots[i].id;
+        if(!copy[i].name || !copy[i].path) {
+            namespace_free_roots(copy, namespace.nroots);
+            errno = ENOMEM;
+            return -1;
+        }
+    }
+    *roots = copy;
+    *count = namespace.nroots;
     return 0;
 }
 
@@ -133,6 +232,10 @@ int namespace_init(const char *root) {
         result = platform_namespace_init(&namespace);
     }
     if(result < 0) {
+        namespace_cleanup();
+        return -1;
+    }
+    if(namespace.synthetic && namespace_refresh() < 0) {
         namespace_cleanup();
         return -1;
     }
@@ -204,7 +307,8 @@ int namespace_resolve(const char *path, ResolvedPath *resolved) {
     if(find_root(name, length, &index) < 0)
         return -1;
 
-    resolved->root_index = index;
+    resolved->root_id = namespace.roots[index].id;
+    resolved->root_path = namespace.roots[index].path;
     resolved->export_root = remainder == NULL || remainder[1] == '\0';
     if(resolved->export_root) {
         if(strlen(namespace.roots[index].path) >= sizeof(resolved->native_path)) {
@@ -226,6 +330,24 @@ int namespace_resolve(const char *path, ResolvedPath *resolved) {
         errno = ENAMETOOLONG;
         return -1;
     }
+    return 0;
+}
+
+int namespace_resolve_root(const NamespaceRoot *root,
+                           ResolvedPath *resolved) {
+    if(!root || !resolved) {
+        errno = EINVAL;
+        return -1;
+    }
+    if(strlen(root->path) >= sizeof(resolved->native_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memset(resolved, 0, sizeof(*resolved));
+    resolved->export_root = 1;
+    resolved->root_id = root->id;
+    resolved->root_path = root->path;
+    strcpy(resolved->native_path, root->path);
     return 0;
 }
 
@@ -294,7 +416,7 @@ uint64_t namespace_qid(const ResolvedPath *resolved, const struct stat *st) {
     if(resolved->synthetic)
         return namespace_root_qid();
     if(namespace.synthetic)
-        root_id = namespace.roots[resolved->root_index].id;
+        root_id = resolved->root_id;
     hash = hash_u64(hash, root_id);
     hash = hash_u64(hash, (uint64_t)st->st_dev);
     hash = hash_u64(hash, (uint64_t)st->st_ino);

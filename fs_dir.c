@@ -178,7 +178,23 @@ void read_synthetic_directory(Ixp9Req *r, FidState *state) {
     int boundary = r->ifcall.tread.offset == 0;
     uint32_t count = fs_read_count(r);
 
-    (void)state;
+    if(r->ifcall.tread.offset == 0) {
+        NamespaceRoot *roots;
+        size_t root_count;
+
+        if(namespace_refresh() < 0 ||
+           namespace_copy_roots(&roots, &root_count) < 0) {
+            respond_errno(r, errno);
+            return;
+        }
+        namespace_free_roots(state->namespace_roots,
+                             state->namespace_root_count);
+        state->namespace_roots = roots;
+        state->namespace_root_count = root_count;
+    } else if(!state->namespace_roots && state->namespace_root_count == 0) {
+        respond_errno(r, EINVAL);
+        return;
+    }
     buffer = s9_malloc(count ? count : 1);
     if(!buffer) {
         respond_errno(r, ENOMEM);
@@ -187,7 +203,7 @@ void read_synthetic_directory(Ixp9Req *r, FidState *state) {
     message = ixp_message(buffer, count, MsgPack);
     message.version = ixp_req_getversion(r);
 
-    for(index = 0; index < namespace.nroots; index++) {
+    for(index = 0; index < state->namespace_root_count; index++) {
         char *virtual_path;
         ResolvedPath resolved;
         struct stat st;
@@ -195,10 +211,11 @@ void read_synthetic_directory(Ixp9Req *r, FidState *state) {
         uint16_t length;
 
         virtual_path = namespace_join_virtual_alloc("/",
-                                                    namespace.roots[index].name);
+                                                    state->namespace_roots[index].name);
         if(!virtual_path)
             continue;
-        if(namespace_resolve(virtual_path, &resolved) < 0 ||
+        if(namespace_resolve_root(&state->namespace_roots[index],
+                                  &resolved) < 0 ||
            platform_lstat(&resolved, &st) < 0) {
             s9_free(virtual_path);
             continue;

@@ -155,6 +155,7 @@ build/allocation_test: test/allocation_test.c alloc.c path.c namespace.c \
 build/platform_posix-synthetic.o: platform_posix.c platform.h namespace.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) \
 		-Dplatform_namespace_init=platform_namespace_init_native \
+		-Dplatform_namespace_discover=platform_namespace_discover_native \
 		-Dplatform_remove=platform_remove_native \
 		-c platform_posix.c -o $@
 

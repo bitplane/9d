@@ -13,6 +13,11 @@ int platform_namespace_init(Namespace *ns) {
     return namespace_use_native(ns, "/");
 }
 
+int platform_namespace_discover(Namespace *ns) {
+    (void)ns;
+    return 0;
+}
+
 int platform_namespace_ready(Namespace *ns) {
     (void)ns;
     return 0;
@@ -42,11 +47,13 @@ static void test_synthetic_namespace(const char *first, const char *second) {
     ResolvedPath other;
     struct stat first_stat;
     struct stat second_stat;
+    uint64_t work_id;
     char *path;
 
     memset(&namespace, 0, sizeof(namespace));
     assert(namespace_use_synthetic(&namespace) == 0);
     assert(namespace_add_root(&namespace, "Work", first) == 0);
+    work_id = namespace.roots[0].id;
     assert(namespace_add_root(&namespace, "Games/%", second) == 0);
     assert(strcmp(namespace.roots[1].name, "Games%2F%25") == 0);
 
@@ -81,6 +88,13 @@ static void test_synthetic_namespace(const char *first, const char *second) {
     assert(namespace_qid(&child, &first_stat) !=
            namespace_qid(&other, &second_stat));
     assert(namespace_qid(&root, &first_stat) == namespace_root_qid());
+    namespace_cleanup();
+
+    memset(&namespace, 0, sizeof(namespace));
+    assert(namespace_use_synthetic(&namespace) == 0);
+    assert(namespace_add_root(&namespace, "Games/%", second) == 0);
+    assert(namespace_add_root(&namespace, "Work", first) == 0);
+    assert(namespace.roots[1].id == work_id);
     namespace_cleanup();
 }
 

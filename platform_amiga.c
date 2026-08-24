@@ -21,29 +21,16 @@ typedef struct VolumeName {
 } VolumeName;
 
 static BPTR native_root;
-static BPTR *synthetic_roots;
-static size_t synthetic_root_count;
 
 void platform_namespace_cleanup(Namespace *ns) {
-    size_t index;
-
     (void)ns;
     if(native_root) {
         UnLock(native_root);
         native_root = BNULL;
     }
-    for(index = 0; index < synthetic_root_count; index++) {
-        if(synthetic_roots[index])
-            UnLock(synthetic_roots[index]);
-    }
-    free(synthetic_roots);
-    synthetic_roots = NULL;
-    synthetic_root_count = 0;
 }
 
 int platform_namespace_ready(Namespace *ns) {
-    size_t index;
-
     platform_namespace_cleanup(ns);
     if(!ns->synthetic) {
         native_root = Lock((STRPTR)ns->native_root, ACCESS_READ);
@@ -52,23 +39,6 @@ int platform_namespace_ready(Namespace *ns) {
             return -1;
         }
         return 0;
-    }
-    if(!ns->nroots)
-        return 0;
-    synthetic_roots = calloc(ns->nroots, sizeof(*synthetic_roots));
-    if(!synthetic_roots) {
-        errno = ENOMEM;
-        return -1;
-    }
-    synthetic_root_count = ns->nroots;
-    for(index = 0; index < ns->nroots; index++) {
-        synthetic_roots[index] = Lock((STRPTR)ns->roots[index].path,
-                                      ACCESS_READ);
-        if(!synthetic_roots[index]) {
-            platform_namespace_cleanup(ns);
-            errno = EACCES;
-            return -1;
-        }
     }
     return 0;
 }
@@ -81,12 +51,13 @@ static void free_names(VolumeName *names) {
     }
 }
 
-static VolumeName *snapshot_names(void) {
+static VolumeName *snapshot_names(int *success) {
     struct DosList *list;
     struct DosList *entry;
     VolumeName *head = NULL;
     VolumeName **tail = &head;
 
+    *success = 0;
     list = LockDosList(LDF_VOLUMES | LDF_READ);
     if(!list)
         return NULL;
@@ -112,18 +83,21 @@ static VolumeName *snapshot_names(void) {
         tail = &volume->next;
     }
     UnLockDosList(LDF_VOLUMES | LDF_READ);
+    *success = 1;
     return head;
 }
 
 int platform_namespace_init(Namespace *ns) {
+    return namespace_use_synthetic(ns);
+}
+
+int platform_namespace_discover(Namespace *ns) {
     VolumeName *names;
     VolumeName *volume;
-    int added = 0;
+    int success;
 
-    if(namespace_use_synthetic(ns) < 0)
-        return -1;
-    names = snapshot_names();
-    if(!names)
+    names = snapshot_names(&success);
+    if(!success)
         return -1;
 
     for(volume = names; volume; volume = volume->next) {
@@ -140,20 +114,14 @@ int platform_namespace_init(Namespace *ns) {
             free_names(names);
             return -1;
         }
-        added++;
     }
     free_names(names);
-    if(!added) {
-        errno = ENOENT;
-        return -1;
-    }
     return 0;
 }
 
 static int parent_is_exported(const ResolvedPath *path) {
-    const char *root_name = namespace.synthetic
-                          ? namespace.roots[path->root_index].path
-                          : namespace.native_root;
+    const char *root_name = namespace.synthetic ? path->root_path
+                                                : namespace.native_root;
     char parent[S9_PATH_MAX];
     char *slash;
     BPTR root;
@@ -172,8 +140,8 @@ static int parent_is_exported(const ResolvedPath *path) {
         *slash = '\0';
     else
         strcpy(parent, root_name);
-    root = DupLock(namespace.synthetic ? synthetic_roots[path->root_index]
-                                       : native_root);
+    root = namespace.synthetic ? Lock((STRPTR)root_name, ACCESS_READ)
+                               : DupLock(native_root);
     current = Lock((STRPTR)parent, ACCESS_READ);
     if(!root || !current)
         goto done;
