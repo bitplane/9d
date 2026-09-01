@@ -1,4 +1,4 @@
-name: Release source archive
+name: Release
 
 on:
   push:
@@ -7,10 +7,14 @@ on:
 
 permissions:
   contents: write
+  packages: read
+
+env:
+  MOUNTIN_TOOLBOX_RELEASE: v0.1.1
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  source:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -25,12 +29,120 @@ jobs:
         run: make dist VERSION="${GITHUB_REF_NAME#v}"
       - name: Verify offline source archive
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version=${GITHUB_REF_NAME#v}
           work=$(mktemp -d)
           tar -C "$work" -xf "dist/9d-$version.tar.xz"
           test ! -e "$work/9d-$version/libixp/.git"
           make -C "$work/9d-$version" release
-      - name: Publish release assets
+      - name: Export source release
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-source
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  binaries:
+    needs: source
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux
+            runner: ubuntu-24.04
+            toolbox: ""
+          - target: aarch64-linux
+            runner: ubuntu-24.04-arm
+            toolbox: ""
+          - target: i386-aros
+            runner: ubuntu-24.04
+            toolbox: aros/2026-08-31/i386
+          - target: aarch64-aros
+            runner: ubuntu-24.04
+            toolbox: aros/2026-08-31/aarch64
+          - target: x86_64-netbsd
+            runner: ubuntu-24.04
+            toolbox: netbsd/10.0/x86_64
+          - target: aarch64-netbsd
+            runner: ubuntu-24.04
+            toolbox: netbsd/10.0/aarch64
+          - target: x86_64-illumos
+            runner: ubuntu-24.04
+            toolbox: illumos/2026-08-13/x86_64
+          - target: x86_64-haiku
+            runner: ubuntu-24.04
+            toolbox: haiku/r1-beta6-hrev59919-1/x86_64
+          - target: aarch64-haiku
+            runner: ubuntu-24.04
+            toolbox: haiku/r1-beta6-hrev59919-1/aarch64
+          - target: x86_64-darwin
+            runner: ubuntu-24.04
+            toolbox: puredarwin/17.4/x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Download source release
+        uses: actions/download-artifact@v8
+        with:
+          name: release-source
+          path: dist
+      - name: Extract source release
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          mkdir source
+          tar -C source --strip-components=1 \
+              -xf "dist/9d-$version.tar.xz"
+      - name: Build native Linux binary
+        if: matrix.toolbox == ''
+        run: scripts/release-binary.sh "${{ matrix.target }}"
+        working-directory: source
+      - name: Build binary with Mountin toolbox
+        if: matrix.toolbox != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.target }}
+          TOOLBOX: ${{ matrix.toolbox }}
+        run: |
+          image="ghcr.io/bitplane/mountin/builder/compiler/$TOOLBOX:$MOUNTIN_TOOLBOX_RELEASE"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io \
+              --username "$GITHUB_ACTOR" --password-stdin
+          docker pull "$image"
+          docker run --rm \
+              --volume "$PWD/source:/work" \
+              --workdir /work \
+              "$image" \
+              ./scripts/release-binary.sh "$TARGET"
+      - name: Package binary
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          archive="dist/9d-$version-$TARGET.tar.xz"
+          tar -C source/build -cJf "$archive" 9d
+          (cd dist && sha256sum "$(basename "$archive")") \
+              > "$archive.sha256"
+      - name: Export binary release
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/9d-*-${{ matrix.target }}.tar.xz
+            dist/9d-*-${{ matrix.target }}.tar.xz.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs:
+      - source
+      - binaries
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download release files
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
