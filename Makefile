@@ -36,6 +36,9 @@ $(error NETWORK must be 0 or 1)
 endif
 
 PLATFORM ?= posix
+ifeq ($(PLATFORM),riscos)
+CPPFLAGS += -DS9_NO_PREAD -DS9_NO_FUTIMENS
+endif
 SRCS = 9d.c alloc.c path.c namespace.c platform_$(PLATFORM).c \
 	fs_ops.c fs_io.c fs_stat.c fs_dir.c
 OBJS = $(patsubst %.c,build/%.o,$(SRCS))

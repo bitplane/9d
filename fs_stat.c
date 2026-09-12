@@ -346,6 +346,10 @@ static int apply_chmod(FidState *state, const ResolvedPath *resolved,
 
 static int apply_times(FidState *state, const ResolvedPath *resolved,
                        time_t atime, time_t mtime) {
+#ifdef S9_NO_FUTIMENS
+    (void)state;
+    return platform_set_times(resolved, atime, mtime);
+#else
     struct timespec times[2];
 
     if(state->fd < 0)
@@ -355,6 +359,7 @@ static int apply_times(FidState *state, const ResolvedPath *resolved,
     times[1].tv_sec = mtime;
     times[1].tv_nsec = 0;
     return futimens(state->fd, times);
+#endif
 }
 
 void fs_wstat(Ixp9Req *r) {
