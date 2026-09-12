@@ -10,8 +10,10 @@
 /* Global variables */
 IxpServer server;
 int debug = 0;
-static int stream_fd;
+static int stream_read_fd;
+static int stream_write_fd;
 static IxpThread stream_thread;
+static IxpThread *stream_base_thread;
 
 /* 9P server operations */
 Ixp9Srv p9srv = {
@@ -41,9 +43,9 @@ static int stream_select(int nfds, fd_set *readfds, fd_set *writefds,
     (void)exceptfds;
     (void)timeout;
 
-    if(readfds && FD_ISSET(stream_fd, readfds)) {
+    if(readfds && FD_ISSET(stream_read_fd, readfds)) {
         FD_ZERO(readfds);
-        FD_SET(stream_fd, readfds);
+        FD_SET(stream_read_fd, readfds);
         return 1;
     }
     return 0;
@@ -55,18 +57,28 @@ static void stop_without_connection(IxpServer *srv) {
 }
 
 /* Handle one already-connected stream directly. */
-static void serve_stream(int fd) {
-    if(debug)
-        fprintf(stderr, "serve_stream: Starting with fd=%d\n", fd);
+static ssize_t stream_write(int fd, const void *buffer, size_t count) {
+    if(fd == stream_read_fd)
+        fd = stream_write_fd;
+    return stream_base_thread->write(fd, buffer, count);
+}
 
-    stream_fd = fd;
+static void serve_stream(int read_fd, int write_fd) {
+    if(debug)
+        fprintf(stderr, "serve_stream: Starting with read fd=%d, write fd=%d\n",
+                read_fd, write_fd);
+
+    stream_read_fd = read_fd;
+    stream_write_fd = write_fd;
+    stream_base_thread = ixp_thread;
     stream_thread = *ixp_thread;
     stream_thread.select = stream_select;
+    stream_thread.write = stream_write;
     ixp_thread = &stream_thread;
     server.preselect = stop_without_connection;
 
     /* Set up 9P service on the already-connected fd */
-    ixp_serve9conn_fd(&server, fd, &p9srv);
+    ixp_serve9conn_fd(&server, read_fd, &p9srv);
 
     if(debug)
         fprintf(stderr, "serve_stream: Entering server loop\n");
@@ -85,6 +97,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -r          Serve the filesystem read-only\n");
     fprintf(stderr, "  -p address  Use '-' for a bidirectional stdin stream\n");
     fprintf(stderr, "              Use stream!path for a connected stream device\n");
+    fprintf(stderr, "              Use streams!input!output for separate streams\n");
 #ifndef NINED_NO_NETWORK
     fprintf(stderr, "              Otherwise listen on a libixp network address\n");
     fprintf(stderr, "              (default: tcp!localhost!564)\n");
@@ -154,7 +167,7 @@ int main(int argc, char *argv[]) {
         server.aux = &p9srv;
 
         /* Serve on stdin/stdout */
-        serve_stream(fd);
+        serve_stream(fd, fd);
 
         nined_state_cleanup();
         namespace_cleanup();
@@ -177,7 +190,39 @@ int main(int argc, char *argv[]) {
         server.aux = &p9srv;
         
         /* Serve the connected stream directly */
-        serve_stream(fd);
+        serve_stream(fd, fd);
+    }
+    else if(strncmp(addr, "streams!", 8) == 0 && addr[8] != '\0') {
+        char *paths = strdup(addr + 8);
+        char *output;
+        int output_fd;
+
+        if(!paths || !(output = strchr(paths, '!')) || output[1] == '\0') {
+            fprintf(stderr, "Invalid split stream address: %s\n", addr);
+            free(paths);
+            exit(1);
+        }
+        *output++ = '\0';
+        output_fd = open(output, O_WRONLY);
+        if(output_fd < 0) {
+            fprintf(stderr, "Failed to open output stream %s: %s\n",
+                    output, strerror(errno));
+            free(paths);
+            exit(1);
+        }
+        fd = open(paths, O_RDONLY);
+        if(fd < 0) {
+            fprintf(stderr, "Failed to open input stream %s: %s\n",
+                    paths, strerror(errno));
+            close(output_fd);
+            free(paths);
+            exit(1);
+        }
+        memset(&server, 0, sizeof(server));
+        server.aux = &p9srv;
+        serve_stream(fd, output_fd);
+        close(output_fd);
+        free(paths);
     }
 #ifndef NINED_NO_NETWORK
     else {

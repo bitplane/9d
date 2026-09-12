@@ -23,6 +23,7 @@
 
 typedef struct Client {
     int fd;
+    int output_fd;
     uint16_t tag;
     uint version;
     char send_buffer[IXP_MAX_MSG];
@@ -49,7 +50,7 @@ static IxpFcall rpc(Client *client, IxpFcall *request) {
                           MsgPack);
     message.version = client->version;
     assert(ixp_fcall2msg(&message, request) != 0);
-    assert(ixp_sendmsg(client->fd, &message) != 0);
+    assert(ixp_sendmsg(client->output_fd, &message) != 0);
     message = ixp_message(client->receive_buffer,
                           sizeof(client->receive_buffer), MsgUnpack);
     message.version = client->version;
@@ -347,6 +348,7 @@ static pid_t start_server_mode(const char *binary, const char *root,
     close(sockets[1]);
     memset(client, 0, sizeof(*client));
     client->fd = sockets[0];
+    client->output_fd = sockets[0];
     client->version = IXP_V9P2000;
     version(client);
     attach(client, 1);
@@ -371,6 +373,7 @@ static pid_t start_raw_server(const char *binary, const char *root,
     close(sockets[1]);
     memset(client, 0, sizeof(*client));
     client->fd = sockets[0];
+    client->output_fd = sockets[0];
     client->version = IXP_V9P2000;
     return child;
 }
@@ -380,10 +383,42 @@ static pid_t start_server(const char *binary, const char *root,
     return start_server_mode(binary, root, client, 0);
 }
 
+static pid_t start_split_server(const char *binary, const char *root,
+                                Client *client) {
+    char address[128];
+    int requests[2];
+    int responses[2];
+    pid_t child;
+
+    assert(pipe(requests) == 0);
+    assert(pipe(responses) == 0);
+    child = fork();
+    assert(child >= 0);
+    if(child == 0) {
+        close(requests[1]);
+        close(responses[0]);
+        assert(snprintf(address, sizeof(address), "streams!/dev/fd/%d!/dev/fd/%d",
+                        requests[0], responses[1]) < (int)sizeof(address));
+        execl(binary, binary, "-p", address, root, (char *)NULL);
+        _exit(127);
+    }
+    close(requests[0]);
+    close(responses[1]);
+    memset(client, 0, sizeof(*client));
+    client->fd = responses[0];
+    client->output_fd = requests[1];
+    client->version = IXP_V9P2000;
+    version(client);
+    attach(client, 1);
+    return child;
+}
+
 static void stop_server(Client *client, pid_t child) {
     int status;
 
     close(client->fd);
+    if(client->output_fd != client->fd)
+        close(client->output_fd);
     assert(waitpid(child, &status, 0) == child);
     assert(WIFEXITED(status));
     assert(WEXITSTATUS(status) == 0);
@@ -1800,6 +1835,8 @@ int main(int argc, char **argv) {
 
     test_invalid_negotiation(argv[1], root);
     test_response_pack_failure(argv[1], root);
+    child = start_split_server(argv[1], root, &client);
+    stop_server(&client, child);
     child = start_server(argv[1], root, &client);
     test_libixp_fid_cleanup(&client);
     test_fid_limit(&client);
