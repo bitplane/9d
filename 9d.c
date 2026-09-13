@@ -6,10 +6,12 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <termios.h>
 
 /* Global variables */
 IxpServer server;
 int debug = 0;
+static int ready;
 static int stream_read_fd;
 static int stream_write_fd;
 static IxpThread stream_thread;
@@ -63,10 +65,66 @@ static ssize_t stream_write(int fd, const void *buffer, size_t count) {
     return stream_base_thread->write(fd, buffer, count);
 }
 
-static void serve_stream(int read_fd, int write_fd) {
+static int configure_tty(int fd) {
+    struct termios attributes;
+
+    if(!isatty(fd))
+        return 0;
+    if(tcgetattr(fd, &attributes) < 0)
+        return -1;
+    attributes.c_iflag &= (tcflag_t)~(tcflag_t)(
+        IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL |
+        IXON | IXOFF);
+    attributes.c_oflag &= (tcflag_t)~(tcflag_t)OPOST;
+    attributes.c_cflag =
+        (attributes.c_cflag & (tcflag_t)~(tcflag_t)(CSIZE | PARENB)) | CS8;
+    attributes.c_lflag &= (tcflag_t)~(tcflag_t)(
+        ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+    attributes.c_cc[VMIN] = 1;
+    attributes.c_cc[VTIME] = 0;
+    return tcsetattr(fd, TCSANOW, &attributes);
+}
+
+static int write_all(int fd, const void *buffer, size_t count) {
+    const unsigned char *position = buffer;
+
+    while(count) {
+        ssize_t written = write(fd, position, count);
+
+        if(written < 0) {
+            if(errno == EINTR)
+                continue;
+            return -1;
+        }
+        if(written == 0) {
+            errno = EIO;
+            return -1;
+        }
+        position += written;
+        count -= (size_t)written;
+    }
+    return 0;
+}
+
+static int serve_stream(int read_fd, int write_fd) {
+    static const char ready_marker[] = "9D-READY\n";
+
     if(debug)
         fprintf(stderr, "serve_stream: Starting with read fd=%d, write fd=%d\n",
                 read_fd, write_fd);
+
+    if(configure_tty(read_fd) < 0 ||
+       (write_fd != read_fd && configure_tty(write_fd) < 0)) {
+        fprintf(stderr, "Cannot configure connected stream: %s\n",
+                strerror(errno));
+        return -1;
+    }
+    if(ready && write_all(write_fd, ready_marker,
+                          sizeof(ready_marker) - 1) < 0) {
+        fprintf(stderr, "Cannot signal connected stream readiness: %s\n",
+                strerror(errno));
+        return -1;
+    }
 
     stream_read_fd = read_fd;
     stream_write_fd = write_fd;
@@ -88,13 +146,15 @@ static void serve_stream(int read_fd, int write_fd) {
 
     if(debug)
         fprintf(stderr, "serve_stream: Connection closed\n");
+    return 0;
 }
 
 static void usage(const char *prog) {
-    fprintf(stderr, "Usage: %s [-d] [-h] [-r] [-p address] [directory]\n", prog);
+    fprintf(stderr, "Usage: %s [-d] [-h] [-r] [-R] [-p address] [directory]\n", prog);
     fprintf(stderr, "  -d          Enable debug output\n");
     fprintf(stderr, "  -h          Show this help\n");
     fprintf(stderr, "  -r          Serve the filesystem read-only\n");
+    fprintf(stderr, "  -R          Signal readiness on a connected stream\n");
     fprintf(stderr, "  -p address  Use '-' for a bidirectional stdin stream\n");
     fprintf(stderr, "              Use stream!path for a connected stream device\n");
     fprintf(stderr, "              Use streams!input!output for separate streams\n");
@@ -108,8 +168,9 @@ static void usage(const char *prog) {
 int main(int argc, char *argv[]) {
     char *addr = nil;
     int c;
+    int status = 0;
 
-    while((c = getopt(argc, argv, "dhrp:")) != -1) {
+    while((c = getopt(argc, argv, "dhrRp:")) != -1) {
         switch(c) {
         case 'd':
             debug = 1;
@@ -119,6 +180,9 @@ int main(int argc, char *argv[]) {
             exit(0);
         case 'r':
             nined.read_only = 1;
+            break;
+        case 'R':
+            ready = 1;
             break;
         case 'p':
             addr = optarg;
@@ -167,11 +231,11 @@ int main(int argc, char *argv[]) {
         server.aux = &p9srv;
 
         /* Serve on stdin/stdout */
-        serve_stream(fd, fd);
+        status = serve_stream(fd, fd) < 0;
 
         nined_state_cleanup();
         namespace_cleanup();
-        return 0;
+        return status;
     }
 
     /* Open an explicitly named connected stream. */
@@ -190,7 +254,7 @@ int main(int argc, char *argv[]) {
         server.aux = &p9srv;
         
         /* Serve the connected stream directly */
-        serve_stream(fd, fd);
+        status = serve_stream(fd, fd) < 0;
     }
     else if(strncmp(addr, "streams!", 8) == 0 && addr[8] != '\0') {
         char *paths = strdup(addr + 8);
@@ -220,7 +284,7 @@ int main(int argc, char *argv[]) {
         }
         memset(&server, 0, sizeof(server));
         server.aux = &p9srv;
-        serve_stream(fd, output_fd);
+        status = serve_stream(fd, output_fd) < 0;
         close(output_fd);
         free(paths);
     }
@@ -251,5 +315,5 @@ int main(int argc, char *argv[]) {
     
     nined_state_cleanup();
     namespace_cleanup();
-    return 0;
+    return status;
 }

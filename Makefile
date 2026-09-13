@@ -104,6 +104,7 @@ test/9pfuse/build/9pfuse:
 
 test: test/9pfuse/build/9pfuse
 	$(MAKE) test-build-options
+	$(MAKE) test-stream
 	$(MAKE) test-namespace
 	$(MAKE) test-allocations
 	$(MAKE) test-protocol
@@ -112,6 +113,9 @@ test: test/9pfuse/build/9pfuse
 
 test-build-options:
 	./test/build_options.sh
+
+test-stream: $(TARGET)
+	python3 test/stream_test.py ./$(TARGET)
 
 test-namespace: build/namespace_test
 	./build/namespace_test
