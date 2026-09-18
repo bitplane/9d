@@ -315,6 +315,15 @@ int platform_symlink(const char *target, const ResolvedPath *path) {
 
 int platform_mknod(const ResolvedPath *path, mode_t mode, unsigned major,
                    unsigned minor) {
+#ifdef __APPLE__
+    /* Darwin 17 has mknod but no descriptor-relative mknodat. */
+    (void)path;
+    (void)mode;
+    (void)major;
+    (void)minor;
+    errno = EOPNOTSUPP;
+    return -1;
+#else
     char leaf[S9_PATH_MAX];
     int parent = open_parent(path, leaf, sizeof(leaf));
     int result;
@@ -334,6 +343,7 @@ int platform_mknod(const ResolvedPath *path, mode_t mode, unsigned major,
     close(parent);
     errno = error;
     return result;
+#endif
 }
 
 int platform_remove(const ResolvedPath *path, int directory) {

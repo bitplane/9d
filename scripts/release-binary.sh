@@ -13,7 +13,7 @@ case "$target" in
             PLATFORM=amiga NETWORK=0 STATIC=0 THREAD_LIBS= \
             STRIP="$STRIP --strip-unneeded -R.comment" \
             API_CPPFLAGS=-D_POSIX_C_SOURCE=200809L \
-            RELEASE_CFLAGS="-Os -fno-common -fno-asynchronous-unwind-tables -fno-unwind-tables -DS9_PATH_MAX=1024"
+            RELEASE_CFLAGS="-Os -fno-common -fno-asynchronous-unwind-tables -fno-unwind-tables -DS9_PATH_MAX=1024 -DS9_NO_PREAD -DS9_NO_FUTIMENS"
         ;;
     x86_64-netbsd|aarch64-netbsd)
         make release \
