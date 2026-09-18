@@ -322,7 +322,14 @@ int platform_mknod(const ResolvedPath *path, mode_t mode, unsigned major,
 
     if(parent < 0)
         return -1;
+#ifdef __HAIKU__
+    /* Haiku only supports FIFO creation, and requires a zero device ID. */
+    (void)major;
+    (void)minor;
+    result = mknodat(parent, leaf, mode, 0);
+#else
     result = mknodat(parent, leaf, mode, makedev(major, minor));
+#endif
     error = errno;
     close(parent);
     errno = error;
@@ -401,6 +408,14 @@ int platform_chown(const ResolvedPath *path, uid_t uid, gid_t gid) {
 }
 
 int platform_device_spec(const struct stat *st, char *buffer, size_t size) {
+#ifdef __HAIKU__
+    /* Haiku does not encode major/minor numbers in st_rdev. */
+    (void)st;
+    (void)buffer;
+    (void)size;
+    errno = ENOTSUP;
+    return -1;
+#else
     char type;
 
     if(S_ISCHR(st->st_mode))
@@ -418,6 +433,7 @@ int platform_device_spec(const struct stat *st, char *buffer, size_t size) {
         return -1;
     }
     return 0;
+#endif
 }
 
 int platform_set_times(const ResolvedPath *path, time_t atime, time_t mtime) {

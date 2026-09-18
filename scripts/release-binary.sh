@@ -28,7 +28,7 @@ case "$target" in
         ;;
     x86_64-haiku|aarch64-haiku)
         make release \
-            NETWORK=0 STATIC=0 THREAD_LIBS= \
+            NETWORK=0 STATIC=0 THREAD_LIBS=-lnetwork \
             STRIP="$STRIP --strip-unneeded" \
             RELEASE_CFLAGS="-Os -g0 -DNDEBUG -DS9_PATH_MAX=1024"
         ;;
