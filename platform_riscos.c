@@ -9,11 +9,20 @@
 #include <unistd.h>
 #include <utime.h>
 
+#ifdef __riscos__
+#include <kernel.h>
+#include <swis.h>
+#endif
+
 void platform_namespace_cleanup(Namespace *ns) {
     (void)ns;
 }
 
 int platform_namespace_ready(Namespace *ns) {
+#ifdef __riscos__
+    if(ns->synthetic)
+        return 0;
+#endif
     struct stat st;
 
     if(ns->synthetic) {
@@ -24,11 +33,40 @@ int platform_namespace_ready(Namespace *ns) {
 }
 
 int platform_namespace_init(Namespace *ns) {
+#ifdef __riscos__
+    return namespace_use_synthetic(ns);
+#else
     return namespace_use_native(ns, "/");
+#endif
 }
 
 int platform_namespace_discover(Namespace *ns) {
+#ifdef __riscos__
+    unsigned number;
+
+    for(number = 0; number < 256; number++) {
+        char name[128];
+        char path[130];
+        struct stat st;
+
+        if(_swix(OS_FSControl, _INR(0, 3), 33, number, name,
+                 sizeof(name)) != NULL || !name[0])
+            continue;
+        if(snprintf(path, sizeof(path), "%s:", name) >= (int)sizeof(path))
+            continue;
+        if(stat(path, &st) < 0 || !S_ISDIR(st.st_mode)) {
+            if(snprintf(path, sizeof(path), "%s::0.$", name) >=
+               (int)sizeof(path))
+                continue;
+            if(stat(path, &st) < 0 || !S_ISDIR(st.st_mode))
+                continue;
+        }
+        if(namespace_add_root(ns, name, path) < 0)
+            return -1;
+    }
+#else
     (void)ns;
+#endif
     return 0;
 }
 
