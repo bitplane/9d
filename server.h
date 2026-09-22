@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include "namespace.h"
+#include "platform.h"
 
 #define nil NULL
 #define S9_DIR_CHECKPOINTS 16
@@ -43,7 +44,7 @@ struct FidState {
     int open_mode;   /* 9P open mode */
     int open_flags;  /* Unix open flags */
     int fd;
-    DIR *dir;
+    PlatformDir *dir;
     char *symlink;
     size_t symlink_length;
     uint64_t dir_offset;

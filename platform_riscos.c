@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -12,6 +13,7 @@
 #ifdef __riscos__
 #include <kernel.h>
 #include <swis.h>
+#include <unixlib/local.h>
 #endif
 
 void platform_namespace_cleanup(Namespace *ns) {
@@ -79,10 +81,27 @@ static int path_allowed(const ResolvedPath *path) {
 }
 
 int platform_lstat(const ResolvedPath *path, struct stat *st) {
-    return path_allowed(path) ? lstat(path->native_path, st) : -1;
+    int result;
+
+    if(!path_allowed(path))
+        return -1;
+    result = lstat(path->native_path, st);
+#ifdef __riscos__
+    if(result == 0) {
+        char native[S9_PATH_MAX];
+        int type;
+
+        if(__riscosify_std(path->native_path, 0, native, sizeof(native),
+                           NULL) != NULL &&
+           _swix(OS_File, _INR(0, 1) | _OUT(0), 5,
+                 native, &type) == NULL && type == 3)
+            st->st_mode = (st->st_mode & ~S_IFMT) | S_IFDIR;
+    }
+#endif
+    return result;
 }
 
-int platform_lstat_child(DIR *directory, const ResolvedPath *path,
+int platform_lstat_child(PlatformDir *directory, const ResolvedPath *path,
                          const char *name, struct stat *st) {
     (void)directory;
     (void)name;
@@ -93,8 +112,130 @@ int platform_open(const ResolvedPath *path, int flags, mode_t mode) {
     return path_allowed(path) ? open(path->native_path, flags, mode) : -1;
 }
 
-DIR *platform_opendir(const ResolvedPath *path) {
+#ifdef __riscos__
+struct PlatformDir {
+    DIR *unix_dir;
+    char native[S9_PATH_MAX];
+    long position;
+    struct dirent entry;
+};
+#endif
+
+PlatformDir *platform_opendir(const ResolvedPath *path) {
+#ifdef __riscos__
+    PlatformDir *directory;
+    int type;
+
+    if(!path_allowed(path))
+        return NULL;
+    directory = calloc(1, sizeof(*directory));
+    if(!directory)
+        return NULL;
+    directory->unix_dir = opendir(path->native_path);
+    if(directory->unix_dir)
+        return directory;
+    if(!__riscosify_std(path->native_path, 0, directory->native,
+                       sizeof(directory->native), NULL) ||
+       _swix(OS_File, _INR(0, 1) | _OUT(0), 5,
+             directory->native, &type) != NULL || type != 3) {
+        free(directory);
+        errno = ENOTDIR;
+        return NULL;
+    }
+    directory->position = 0;
+    return directory;
+#else
     return path_allowed(path) ? opendir(path->native_path) : NULL;
+#endif
+}
+
+struct dirent *platform_readdir(PlatformDir *directory) {
+#ifdef __riscos__
+    char name[S9_PATH_MAX];
+    _kernel_swi_regs regs;
+    _kernel_oserror *error;
+    size_t length;
+    const char *end;
+
+    if(directory->unix_dir)
+        return readdir(directory->unix_dir);
+    if(directory->position == -1) {
+        errno = 0;
+        return NULL;
+    }
+    memset(&regs, 0, sizeof(regs));
+    regs.r[0] = 9;
+    regs.r[1] = (int)directory->native;
+    regs.r[2] = (int)name;
+    regs.r[3] = 1;
+    regs.r[4] = directory->position;
+    regs.r[5] = sizeof(name);
+    error = _kernel_swi(OS_GBPB, &regs, &regs);
+    if(error) {
+        errno = EIO;
+        return NULL;
+    }
+    directory->position = regs.r[4];
+    if(regs.r[3] == 0) {
+        errno = 0;
+        return NULL;
+    }
+    end = memchr(name, 0, sizeof(name));
+    if(!end) {
+        errno = EIO;
+        return NULL;
+    }
+    length = (size_t)(end - name);
+    if(length >= sizeof(directory->entry.d_name)) {
+        errno = ENAMETOOLONG;
+        return NULL;
+    }
+    memcpy(directory->entry.d_name, name, length + 1);
+    return &directory->entry;
+#else
+    return readdir(directory);
+#endif
+}
+
+long platform_telldir(PlatformDir *directory) {
+#ifdef __riscos__
+    return directory->unix_dir ? telldir(directory->unix_dir) :
+           directory->position;
+#else
+    return telldir(directory);
+#endif
+}
+
+void platform_seekdir(PlatformDir *directory, long position) {
+#ifdef __riscos__
+    if(directory->unix_dir)
+        seekdir(directory->unix_dir, position);
+    else
+        directory->position = position;
+#else
+    seekdir(directory, position);
+#endif
+}
+
+void platform_rewinddir(PlatformDir *directory) {
+#ifdef __riscos__
+    if(directory->unix_dir)
+        rewinddir(directory->unix_dir);
+    else
+        directory->position = 0;
+#else
+    rewinddir(directory);
+#endif
+}
+
+int platform_closedir(PlatformDir *directory) {
+#ifdef __riscos__
+    int result = directory->unix_dir ? closedir(directory->unix_dir) : 0;
+    free(directory);
+    return result;
+#else
+    return closedir(directory);
+#endif
 }
 
 ssize_t platform_readlink(const ResolvedPath *path, char *buffer, size_t size) {

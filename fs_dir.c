@@ -40,9 +40,9 @@ static int next_directory_stat(FidState *state, IxpStat *stat,
         ResolvedPath resolved;
         struct stat native;
 
-        *before = telldir(state->dir);
+        *before = platform_telldir(state->dir);
         errno = 0;
-        entry = readdir(state->dir);
+        entry = platform_readdir(state->dir);
         if(!entry)
             return errno ? -1 : 0;
         if(strcmp(entry->d_name, ".") == 0 ||
@@ -64,7 +64,7 @@ static int next_directory_stat(FidState *state, IxpStat *stat,
             return -1;
         }
         s9_free(virtual_path);
-        *after = telldir(state->dir);
+        *after = platform_telldir(state->dir);
         return 1;
     }
 }
@@ -75,18 +75,18 @@ static int seek_directory(FidState *state, uint64_t offset, uint version) {
     if(offset == state->dir_offset)
         return 0;
     if(offset == 0) {
-        rewinddir(state->dir);
+        platform_rewinddir(state->dir);
         state->dir_offset = 0;
         return 0;
     }
     checkpoint = find_checkpoint(state, offset);
     if(checkpoint) {
-        seekdir(state->dir, checkpoint->cookie);
+        platform_seekdir(state->dir, checkpoint->cookie);
         state->dir_offset = offset;
         return 0;
     }
 
-    rewinddir(state->dir);
+    platform_rewinddir(state->dir);
     state->dir_offset = 0;
     while(state->dir_offset < offset) {
         IxpStat stat;
@@ -99,7 +99,7 @@ static int seek_directory(FidState *state, uint64_t offset, uint version) {
         if(result <= 0) {
             int error = result == 0 ? EINVAL : errno;
 
-            rewinddir(state->dir);
+            platform_rewinddir(state->dir);
             state->dir_offset = 0;
             errno = error;
             return -1;
@@ -108,7 +108,7 @@ static int seek_directory(FidState *state, uint64_t offset, uint version) {
         free_stat_strings(&stat);
         if(state->dir_offset > UINT64_MAX - length ||
            state->dir_offset + length > offset) {
-            rewinddir(state->dir);
+            platform_rewinddir(state->dir);
             state->dir_offset = 0;
             errno = EINVAL;
             return -1;
@@ -149,7 +149,7 @@ void read_directory(Ixp9Req *r, FidState *state) {
         if(result < 0) {
             int error = errno;
 
-            seekdir(state->dir, before);
+            platform_seekdir(state->dir, before);
             s9_free(buffer);
             respond_errno(r, error);
             return;
@@ -157,7 +157,7 @@ void read_directory(Ixp9Req *r, FidState *state) {
         length = ixp_sizeof_stat(&stat, ixp_req_getversion(r));
         if((size_t)(message.end - message.pos) < length) {
             free_stat_strings(&stat);
-            seekdir(state->dir, before);
+            platform_seekdir(state->dir, before);
             break;
         }
         remember_checkpoint(state, state->dir_offset + length, after);

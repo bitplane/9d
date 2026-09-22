@@ -110,7 +110,7 @@ void fid_state_close(FidState *state) {
         state->fd = -1;
     }
     if(state->dir) {
-        closedir(state->dir);
+        platform_closedir(state->dir);
         state->dir = NULL;
     }
     namespace_free_roots(state->namespace_roots,

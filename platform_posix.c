@@ -217,7 +217,7 @@ int platform_lstat(const ResolvedPath *path, struct stat *st) {
     return result;
 }
 
-int platform_lstat_child(DIR *directory, const ResolvedPath *path,
+int platform_lstat_child(PlatformDir *directory, const ResolvedPath *path,
                          const char *name, struct stat *st) {
     (void)path;
     return fstatat(dirfd(directory), name, st, AT_SYMLINK_NOFOLLOW);
@@ -238,9 +238,9 @@ int platform_open(const ResolvedPath *path, int flags, mode_t mode) {
     return descriptor;
 }
 
-DIR *platform_opendir(const ResolvedPath *path) {
+PlatformDir *platform_opendir(const ResolvedPath *path) {
     int descriptor = platform_open(path, O_RDONLY | O_DIRECTORY, 0);
-    DIR *directory;
+    PlatformDir *directory;
 
     if(descriptor < 0)
         return NULL;
@@ -251,6 +251,26 @@ DIR *platform_opendir(const ResolvedPath *path) {
         errno = error;
     }
     return directory;
+}
+
+struct dirent *platform_readdir(PlatformDir *directory) {
+    return readdir(directory);
+}
+
+long platform_telldir(PlatformDir *directory) {
+    return telldir(directory);
+}
+
+void platform_seekdir(PlatformDir *directory, long position) {
+    seekdir(directory, position);
+}
+
+void platform_rewinddir(PlatformDir *directory) {
+    rewinddir(directory);
+}
+
+int platform_closedir(PlatformDir *directory) {
+    return closedir(directory);
 }
 
 ssize_t platform_readlink(const ResolvedPath *path, char *buffer, size_t size) {

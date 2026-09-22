@@ -8,11 +8,22 @@
 #include <sys/types.h>
 #include <utime.h>
 
+#ifdef __riscos__
+typedef struct PlatformDir PlatformDir;
+#else
+typedef DIR PlatformDir;
+#endif
+
 int platform_lstat(const ResolvedPath *path, struct stat *st);
-int platform_lstat_child(DIR *directory, const ResolvedPath *path,
+int platform_lstat_child(PlatformDir *directory, const ResolvedPath *path,
                          const char *name, struct stat *st);
 int platform_open(const ResolvedPath *path, int flags, mode_t mode);
-DIR *platform_opendir(const ResolvedPath *path);
+PlatformDir *platform_opendir(const ResolvedPath *path);
+struct dirent *platform_readdir(PlatformDir *directory);
+long platform_telldir(PlatformDir *directory);
+void platform_seekdir(PlatformDir *directory, long position);
+void platform_rewinddir(PlatformDir *directory);
+int platform_closedir(PlatformDir *directory);
 ssize_t platform_readlink(const ResolvedPath *path, char *buffer, size_t size);
 int platform_access_execute(const ResolvedPath *path);
 int platform_mkdir(const ResolvedPath *path, mode_t mode);
