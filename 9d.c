@@ -8,6 +8,13 @@
 #include <errno.h>
 #include <termios.h>
 
+#ifdef __AROS__
+#include "version.h"
+
+static const char verstag[] __attribute__((used)) =
+    "\0$VER: 9d " NINED_VERSION " (" NINED_DATE ")";
+#endif
+
 /* Global variables */
 IxpServer server;
 int debug = 0;

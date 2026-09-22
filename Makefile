@@ -4,7 +4,7 @@ CC ?= gcc
 AR ?= ar
 STRIP ?= strip
 API_CPPFLAGS ?= -D_XOPEN_SOURCE=700 -D_POSIX_C_SOURCE=200809L
-CPPFLAGS += $(API_CPPFLAGS) -Ilibixp/include
+CPPFLAGS += $(API_CPPFLAGS) -Ilibixp/include -Ibuild
 CFLAGS += -g -O0
 DEPFLAGS = -MMD -MP
 THREAD_LIBS ?= -lpthread
@@ -64,6 +64,17 @@ all: $(TARGET)
 
 $(TARGET): $(OBJS) build/libixp.a
 	$(LINK.c) -o $@ $(OBJS) $(LIBS)
+
+ifeq ($(PLATFORM),amiga)
+build/9d.o: build/version.h
+endif
+
+build/version.h: FORCE | build
+	@sh scripts/version.sh > $@.tmp
+	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
+
+.PHONY: FORCE
+FORCE:
 
 build/%.o: %.c | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
