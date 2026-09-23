@@ -9,6 +9,10 @@ permissions:
   contents: write
   packages: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   source:
     runs-on: ubuntu-24.04
@@ -31,13 +35,21 @@ jobs:
           tar -C "$work" -xf "dist/9d-$version.tar.xz"
           test ! -e "$work/9d-$version/libixp/.git"
           make -C "$work/9d-$version" release
+      - name: Create release and upload sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --generate-notes
+          sh scripts/aros/upload.sh "$GITHUB_REF_NAME" dist/*
       - name: Export source release
         uses: actions/upload-artifact@v7
         with:
           name: release-source
           path: dist/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14
 
   binaries:
     needs: source
@@ -57,6 +69,9 @@ jobs:
           - target: aarch64-aros
             runner: ubuntu-24.04
             toolbox: aros/2026-08-31/aarch64:v0.1.1
+          - target: x86_64-aros
+            runner: ubuntu-24.04
+            toolbox: aros/2026-08-31/x86_64:v0.1.8
           - target: x86_64-netbsd
             runner: ubuntu-24.04
             toolbox: netbsd/10.0/x86_64:v0.1.1
@@ -78,76 +93,10 @@ jobs:
           - target: x86_64-darwin
             runner: ubuntu-24.04
             toolbox: puredarwin/17.4/x86_64:v0.1.1
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Download source release
-        uses: actions/download-artifact@v8
-        with:
-          name: release-source
-          path: dist
-      - name: Extract source release
-        run: |
-          version=${GITHUB_REF_NAME#v}
-          mkdir source
-          tar -C source --strip-components=1 \
-              -xf "dist/9d-$version.tar.xz"
-      - name: Build native Linux binary
-        if: matrix.toolbox == ''
-        run: scripts/release-binary.sh "${{ matrix.target }}"
-        working-directory: source
-      - name: Build binary with Mountin toolbox
-        if: matrix.toolbox != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TARGET: ${{ matrix.target }}
-          TOOLBOX: ${{ matrix.toolbox }}
-        run: |
-          image="ghcr.io/bitplane/mountin/builder/compiler/$TOOLBOX"
-          printf '%s' "$GH_TOKEN" | docker login ghcr.io \
-              --username "$GITHUB_ACTOR" --password-stdin
-          docker pull "$image"
-          docker run --rm \
-              --volume "$PWD/source:/work" \
-              --workdir /work \
-              "$image" \
-              ./scripts/release-binary.sh "$TARGET"
-      - name: Package binary
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          version=${GITHUB_REF_NAME#v}
-          archive="dist/9d-$version-$TARGET.tar.xz"
-          tar -C source/build -cJf "$archive" 9d
-          (cd dist && sha256sum "$(basename "$archive")") \
-              > "$archive.sha256"
-      - name: Export binary release
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-${{ matrix.target }}
-          path: |
-            dist/9d-*-${{ matrix.target }}.tar.xz
-            dist/9d-*-${{ matrix.target }}.tar.xz.sha256
-          if-no-files-found: error
-          retention-days: 1
-
-  publish:
-    needs:
-      - source
-      - binaries
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Download release files
-        uses: actions/download-artifact@v8
-        with:
-          pattern: release-*
-          path: dist
-          merge-multiple: true
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-              --verify-tag --generate-notes
-          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            dist/* --clobber
+    uses: ./.github/workflows/release-target.yml
+    with:
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
+      toolbox: ${{ matrix.toolbox }}
+    secrets:
+      AROS_PKG_KEY: ${{ secrets.AROS_PKG_KEY }}

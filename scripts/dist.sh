@@ -59,6 +59,7 @@ printf '%s\n' "$LIBIXP_COMMIT" > "$stage/libixp/.9d-commit"
 printf '%s\n' "$version" > "$stage/.release-version"
 TZ=UTC git -C "$root" log -1 --format=%cd --date=format-local:%d.%m.%Y \
     >> "$stage/.release-version"
+printf '%s\n' "$epoch" >> "$stage/.release-version"
 
 tar -C "$stage_root" --sort=name --mtime="@$epoch" \
     --owner=0 --group=0 --numeric-owner -cJf "$archive" "$package"

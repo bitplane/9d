@@ -8,7 +8,7 @@ case "$target" in
         make release \
             RELEASE_CFLAGS="-Os -DNDEBUG -DS9_PATH_MAX=1024"
         ;;
-    i386-aros|aarch64-aros)
+    i386-aros|aarch64-aros|x86_64-aros)
         make release \
             PLATFORM=amiga NETWORK=0 STATIC=0 THREAD_LIBS= \
             STRIP="$STRIP --strip-unneeded -R.comment" \

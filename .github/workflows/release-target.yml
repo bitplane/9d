@@ -1,0 +1,92 @@
+name: Release target
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      toolbox:
+        required: true
+        type: string
+    secrets:
+      AROS_PKG_KEY:
+        required: false
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download source release
+        uses: actions/download-artifact@v8
+        with:
+          name: release-source
+          path: dist
+      - name: Extract source release
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          mkdir source
+          tar -C source --strip-components=1 \
+              -xf "dist/9d-$version.tar.xz"
+      - name: Build native Linux binary
+        if: inputs.toolbox == ''
+        run: scripts/release-binary.sh "${{ inputs.target }}"
+        working-directory: source
+      - name: Build binary with Mountin toolbox
+        if: inputs.toolbox != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ inputs.target }}
+          TOOLBOX: ${{ inputs.toolbox }}
+        run: |
+          image="ghcr.io/bitplane/mountin/builder/compiler/$TOOLBOX"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io \
+              --username "$GITHUB_ACTOR" --password-stdin
+          docker pull "$image"
+          docker run --rm \
+              --volume "$PWD/source:/work" \
+              --workdir /work \
+              "$image" \
+              ./scripts/release-binary.sh "$TARGET"
+      - name: Package binary
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          case "$TARGET" in
+            *-aros)
+              sh source/scripts/aros/package.sh "$TARGET"
+              cp source/dist/*.tar.bz2* dist/
+              ;;
+            *)
+              archive="dist/9d-$version-$TARGET.tar.xz"
+              tar -C source/build -cJf "$archive" 9d
+              (cd dist && sha256sum "$(basename "$archive")") > "$archive.sha256"
+              ;;
+          esac
+      - name: Export binary release
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ inputs.target }}
+          path: dist/9d-*-${{ inputs.target }}.tar.*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload binary release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ inputs.target }}
+        run: sh scripts/aros/upload.sh "$GITHUB_REF_NAME" dist/9d-*-"$TARGET".tar.*
+
+  sync-pkg:
+    needs: build
+    if: endsWith(inputs.target, '-aros')
+    uses: ./.github/workflows/sync-aros.yml
+    with:
+      tag: ${{ github.ref_name }}
+      target: ${{ inputs.target }}
+    secrets:
+      AROS_PKG_KEY: ${{ secrets.AROS_PKG_KEY }}
