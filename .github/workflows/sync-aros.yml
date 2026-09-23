@@ -37,8 +37,6 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v6
-        with:
-          ref: ${{ inputs.tag }}
       - name: Download published archive
         env:
           GH_TOKEN: ${{ github.token }}
@@ -59,7 +57,8 @@ jobs:
           git init "$pkg_source"
           git -C "$pkg_source" fetch --depth=1 https://github.com/jonx/aros-pkg.git a7cb77b6843205ebeca3997adaeebdfc626aab2e
           git -C "$pkg_source" checkout --detach FETCH_HEAD
-          make -C "$pkg_source" build/pkg
+          # Keep the pinned tool building until upstream fixes its HTTP redirect warning.
+          make -C "$pkg_source" build/pkg CFLAGS="-std=c99 -Wall -Wextra -Werror -Wno-error=restrict -O2"
       - name: Sign and publish
         env:
           AROS_PKG_KEY: ${{ secrets.AROS_PKG_KEY }}
