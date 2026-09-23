@@ -9,8 +9,8 @@ case "$version" in ''|*[!0-9.]*) echo "Expected release metadata from make dist"
 # The source archive records a fixed timestamp, shared by every architecture.
 epoch=$(sed -n '3p' "$root/.release-version")
 case "$epoch" in ''|*[!0-9]*) echo "Missing source timestamp; recreate the source archive" >&2; exit 1 ;; esac
-mkdir -p "$root/build" "$root/dist"
-work=$(mktemp -d "$root/build/package-aros.XXXXXX")
+mkdir -p "$root/dist"
+work=$(mktemp -d "$root/dist/.package-aros.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 package=9d
 mkdir -p "$work/$package/C" "$work/$package/Help/9d"
