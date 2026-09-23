@@ -33,6 +33,10 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-24.04
+    # The portal shares upload staging between pushes to the same channel.
+    concurrency:
+      group: aros-pkg-bitplane
+      queue: max
     # Portal/tool failures must never invalidate the GitHub release.
     continue-on-error: true
     steps:
