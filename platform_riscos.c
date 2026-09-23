@@ -42,29 +42,81 @@ int platform_namespace_init(Namespace *ns) {
 #endif
 }
 
+#ifdef __riscos__
+static int native_directory(const char *path) {
+    ResolvedPath resolved;
+    struct stat st;
+
+    memset(&resolved, 0, sizeof(resolved));
+    if(snprintf(resolved.native_path, sizeof(resolved.native_path), "%s", path) >=
+       (int)sizeof(resolved.native_path))
+        return 0;
+    return platform_lstat(&resolved, &st) == 0 && S_ISDIR(st.st_mode);
+}
+#endif
+
+#ifdef __riscos__
+static int add_drive_root(Namespace *ns, const char *name, unsigned drive) {
+    char path[S9_PATH_MAX];
+    char root_name[132];
+
+    if(snprintf(path, sizeof(path), "%s::%u.$", name, drive) >=
+       (int)sizeof(path) || !native_directory(path))
+        return 0;
+    if(snprintf(root_name, sizeof(root_name), "%s-%u", name, drive) >=
+       (int)sizeof(root_name))
+        return 0;
+    return namespace_add_root(ns, root_name, path);
+}
+#endif
+
 int platform_namespace_discover(Namespace *ns) {
 #ifdef __riscos__
     unsigned number;
 
     for(number = 0; number < 256; number++) {
         char name[128];
-        char path[130];
-        struct stat st;
+        char path[S9_PATH_MAX];
+        unsigned drive;
+        int direct;
+        int root_zero = 0;
 
         if(_swix(OS_FSControl, _INR(0, 3), 33, number, name,
                  sizeof(name)) != NULL || !name[0])
             continue;
         if(snprintf(path, sizeof(path), "%s:", name) >= (int)sizeof(path))
             continue;
-        if(stat(path, &st) < 0 || !S_ISDIR(st.st_mode)) {
+        direct = native_directory(path);
+        if(!direct) {
             if(snprintf(path, sizeof(path), "%s::0.$", name) >=
                (int)sizeof(path))
                 continue;
-            if(stat(path, &st) < 0 || !S_ISDIR(st.st_mode))
-                continue;
+            root_zero = native_directory(path);
         }
-        if(namespace_add_root(ns, name, path) < 0)
+        if((direct || root_zero) && namespace_add_root(ns, name, path) < 0)
             return -1;
+
+        if(strcmp(name, "SCSI") == 0) {
+            for(drive = 0; drive < 8; drive++) {
+                int ready = 0;
+                if(drive == 0 && root_zero)
+                    continue;
+                if(drive >= 4 &&
+                   (_swix(SCSIFS_TestReady, _IN(1)|_OUT(0), drive,
+                          &ready) != NULL || ready != 2))
+                    continue;
+                if(add_drive_root(ns, name, drive) < 0)
+                    return -1;
+            }
+        } else if(strcmp(name, "CDFS") == 0) {
+            int configured = 0;
+            if(_swix(CDFS_GetNumberOfDrives, _OUT(0), &configured) == NULL) {
+                for(drive = 1; drive < (unsigned)configured; drive++) {
+                    if(add_drive_root(ns, name, drive) < 0)
+                        return -1;
+                }
+            }
+        }
     }
 #else
     (void)ns;
