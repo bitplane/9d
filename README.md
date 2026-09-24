@@ -31,8 +31,9 @@ Without a dir, 9d serves the platform's filesystem root: `/` on Unix-like
 systems, or a path above the available filing systems and volumes elsewhere.
 
 The default address for a network server is `tcp!localhost!564`.
-Use `-p -` for stdio or `-p stream!path` for an existing device like a serial
-port.
+Use `-p -` for stdio or `-p stream!path` for an existing connected device.
+On RISC OS, use `-p serial!path` for the serial port; this retries when the
+output queue is full so binary 9P responses are not truncated.
 
 ## Status
 
