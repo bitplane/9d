@@ -154,14 +154,29 @@ int platform_lstat(const ResolvedPath *path, struct stat *st) {
     regs.r[0] = 5;
     regs.r[1] = (int)native;
     if(_kernel_swi(OS_File, &regs, &regs) != NULL) {
-        errno = EIO;
-        return -1;
+        /* Some filing systems reject OS_File on their volume root but
+         * enumerate that root through OS_GBPB. */
+        char first[S9_PATH_MAX];
+        memset(&regs, 0, sizeof(regs));
+        regs.r[0] = 9;
+        regs.r[1] = (int)native;
+        regs.r[2] = (int)first;
+        regs.r[3] = 1;
+        regs.r[4] = 0;
+        regs.r[5] = sizeof(first);
+        if(_kernel_swi(OS_GBPB, &regs, &regs) != NULL) {
+            errno = EIO;
+            return -1;
+        }
+        type = 3;
+        load = exec = length = attributes = 0;
+    } else {
+        type = regs.r[0];
+        load = regs.r[2];
+        exec = regs.r[3];
+        length = regs.r[4];
+        attributes = regs.r[5];
     }
-    type = regs.r[0];
-    load = regs.r[2];
-    exec = regs.r[3];
-    length = regs.r[4];
-    attributes = regs.r[5];
     if(type == 0) {
         errno = ENOENT;
         return -1;
@@ -222,19 +237,21 @@ struct PlatformDir {
 PlatformDir *platform_opendir(const ResolvedPath *path) {
 #ifdef __riscos__
     PlatformDir *directory;
-    int type;
+    struct stat st;
 
     /* FileSwitch skips FAT directory metadata entries that UnixLib readdir
      * exposes as repeated names. Use its directory cursor directly. */
     if(!path_allowed(path))
         return NULL;
+    if(platform_lstat(path, &st) < 0 || !S_ISDIR(st.st_mode)) {
+        errno = ENOTDIR;
+        return NULL;
+    }
     directory = calloc(1, sizeof(*directory));
     if(!directory)
         return NULL;
     if(!__riscosify_std(path->native_path, 0, directory->native,
-                       sizeof(directory->native), NULL) ||
-       _swix(OS_File, _INR(0, 1) | _OUT(0), 5,
-             directory->native, &type) != NULL || (type != 2 && type != 3)) {
+                       sizeof(directory->native), NULL)) {
         free(directory);
         errno = ENOTDIR;
         return NULL;
