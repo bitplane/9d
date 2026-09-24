@@ -78,6 +78,30 @@ int joinpath(char *dst, size_t dstsize, const char *dir, const char *name) {
         return -1;
 
     dirlen = strlen(dir);
+#ifdef __riscos__
+    /* FileSwitch uses dots between native path components and slashes
+     * inside leaf names where Unix paths use full stops. */
+    if(strchr(dir, ':')) {
+        size_t used = dirlen;
+        if(used >= dstsize)
+            return -1;
+        memcpy(dst, dir, used);
+        if(used && dst[used - 1] != ':') {
+            if(used + 1 >= dstsize)
+                return -1;
+            dst[used++] = '.';
+        }
+        while(*name == '/')
+            name++;
+        for(; *name; name++) {
+            if(used + 1 >= dstsize)
+                return -1;
+            dst[used++] = *name == '/' ? '.' : *name == '.' ? '/' : *name;
+        }
+        dst[used] = '\0';
+        return 0;
+    }
+#endif
     if(dirlen > 0 && (dir[dirlen - 1] == '/' || dir[dirlen - 1] == ':')) {
         while(*name == '/')
             name++;
