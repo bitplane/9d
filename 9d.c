@@ -21,6 +21,12 @@ int debug = 0;
 static int ready;
 static int stream_read_fd;
 static int stream_write_fd;
+#ifdef __riscos__
+static int stream_serial_output;
+/* UnixLib's tty write reports success even when the serial output queue is
+ * full. Its low-level writer returns the queue status so 9P can retry. */
+extern int __os_423vdu(int);
+#endif
 static IxpThread stream_thread;
 static IxpThread *stream_base_thread;
 
@@ -69,6 +75,17 @@ static void stop_without_connection(IxpServer *srv) {
 static ssize_t stream_write(int fd, const void *buffer, size_t count) {
     if(fd == stream_read_fd)
         fd = stream_write_fd;
+#ifdef __riscos__
+    if(stream_serial_output) {
+        const unsigned char *position = buffer;
+        size_t index;
+        for(index = 0; index < count; index++) {
+            while(__os_423vdu(position[index]) < 0)
+                usleep(1000);
+        }
+        return (ssize_t)count;
+    }
+#endif
     return stream_base_thread->write(fd, buffer, count);
 }
 
@@ -164,6 +181,9 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -R          Signal readiness on a connected stream\n");
     fprintf(stderr, "  -p address  Use '-' for a bidirectional stdin stream\n");
     fprintf(stderr, "              Use stream!path for a connected stream device\n");
+#ifdef __riscos__
+    fprintf(stderr, "              Use serial!path for a RISC OS serial device\n");
+#endif
     fprintf(stderr, "              Use streams!input!output for separate streams\n");
 #ifndef NINED_NO_NETWORK
     fprintf(stderr, "              Otherwise listen on a libixp network address\n");
@@ -246,7 +266,14 @@ int main(int argc, char *argv[]) {
     }
 
     /* Open an explicitly named connected stream. */
-    if(strncmp(addr, "stream!", 7) == 0 && addr[7] != '\0') {
+    if((strncmp(addr, "stream!", 7) == 0 && addr[7] != '\0')
+#ifdef __riscos__
+       || (strncmp(addr, "serial!", 7) == 0 && addr[7] != '\0')
+#endif
+      ) {
+#ifdef __riscos__
+        stream_serial_output = strncmp(addr, "serial!", 7) == 0;
+#endif
         fd = open(addr + 7, O_RDWR);
         if(fd < 0) {
             fprintf(stderr, "Failed to open stream %s: %s\n",
