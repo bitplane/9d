@@ -213,7 +213,6 @@ int platform_open(const ResolvedPath *path, int flags, mode_t mode) {
 
 #ifdef __riscos__
 struct PlatformDir {
-    DIR *unix_dir;
     char native[S9_PATH_MAX];
     long position;
     struct dirent entry;
@@ -225,18 +224,17 @@ PlatformDir *platform_opendir(const ResolvedPath *path) {
     PlatformDir *directory;
     int type;
 
+    /* FileSwitch skips FAT directory metadata entries that UnixLib readdir
+     * exposes as repeated names. Use its directory cursor directly. */
     if(!path_allowed(path))
         return NULL;
     directory = calloc(1, sizeof(*directory));
     if(!directory)
         return NULL;
-    directory->unix_dir = opendir(path->native_path);
-    if(directory->unix_dir)
-        return directory;
     if(!__riscosify_std(path->native_path, 0, directory->native,
                        sizeof(directory->native), NULL) ||
        _swix(OS_File, _INR(0, 1) | _OUT(0), 5,
-             directory->native, &type) != NULL || type != 3) {
+             directory->native, &type) != NULL || (type != 2 && type != 3)) {
         free(directory);
         errno = ENOTDIR;
         return NULL;
@@ -254,10 +252,9 @@ struct dirent *platform_readdir(PlatformDir *directory) {
     _kernel_swi_regs regs;
     _kernel_oserror *error;
     size_t length;
+    size_t i;
     const char *end;
 
-    if(directory->unix_dir)
-        return readdir(directory->unix_dir);
     if(directory->position == -1) {
         errno = 0;
         return NULL;
@@ -290,6 +287,11 @@ struct dirent *platform_readdir(PlatformDir *directory) {
         return NULL;
     }
     memcpy(directory->entry.d_name, name, length + 1);
+    /* A slash in a RISC OS leaf name represents a Unix full stop. */
+    for(i = 0; i < length; i++) {
+        if(directory->entry.d_name[i] == '/')
+            directory->entry.d_name[i] = '.';
+    }
     return &directory->entry;
 #else
     return readdir(directory);
@@ -298,8 +300,7 @@ struct dirent *platform_readdir(PlatformDir *directory) {
 
 long platform_telldir(PlatformDir *directory) {
 #ifdef __riscos__
-    return directory->unix_dir ? telldir(directory->unix_dir) :
-           directory->position;
+    return directory->position;
 #else
     return telldir(directory);
 #endif
@@ -307,10 +308,7 @@ long platform_telldir(PlatformDir *directory) {
 
 void platform_seekdir(PlatformDir *directory, long position) {
 #ifdef __riscos__
-    if(directory->unix_dir)
-        seekdir(directory->unix_dir, position);
-    else
-        directory->position = position;
+    directory->position = position;
 #else
     seekdir(directory, position);
 #endif
@@ -318,10 +316,7 @@ void platform_seekdir(PlatformDir *directory, long position) {
 
 void platform_rewinddir(PlatformDir *directory) {
 #ifdef __riscos__
-    if(directory->unix_dir)
-        rewinddir(directory->unix_dir);
-    else
-        directory->position = 0;
+    directory->position = 0;
 #else
     rewinddir(directory);
 #endif
@@ -329,9 +324,8 @@ void platform_rewinddir(PlatformDir *directory) {
 
 int platform_closedir(PlatformDir *directory) {
 #ifdef __riscos__
-    int result = directory->unix_dir ? closedir(directory->unix_dir) : 0;
     free(directory);
-    return result;
+    return 0;
 #else
     return closedir(directory);
 #endif
