@@ -133,24 +133,71 @@ static int path_allowed(const ResolvedPath *path) {
 }
 
 int platform_lstat(const ResolvedPath *path, struct stat *st) {
-    int result;
-
     if(!path_allowed(path))
         return -1;
-    result = lstat(path->native_path, st);
 #ifdef __riscos__
-    if(result == 0) {
-        char native[S9_PATH_MAX];
-        int type;
+    /* UnixLib lstat can block on files supplied by non-FileCore filing
+     * systems. Query the filing system directly for 9P metadata instead. */
+    char native[S9_PATH_MAX];
+    int type, load, exec, length, attributes;
+    unsigned long long centiseconds;
+    unsigned int identity_low = 2166136261u;
+    unsigned int identity_high = 0x9e3779b9u;
+    const unsigned char *part;
+    _kernel_swi_regs regs;
 
-        if(__riscosify_std(path->native_path, 0, native, sizeof(native),
-                           NULL) != NULL &&
-           _swix(OS_File, _INR(0, 1) | _OUT(0), 5,
-                 native, &type) == NULL && type == 3)
-            st->st_mode = (st->st_mode & ~S_IFMT) | S_IFDIR;
+    if(!__riscosify_std(path->native_path, 0, native, sizeof(native), NULL)) {
+        errno = EILSEQ;
+        return -1;
     }
+    memset(&regs, 0, sizeof(regs));
+    regs.r[0] = 5;
+    regs.r[1] = (int)native;
+    if(_kernel_swi(OS_File, &regs, &regs) != NULL) {
+        errno = EIO;
+        return -1;
+    }
+    type = regs.r[0];
+    load = regs.r[2];
+    exec = regs.r[3];
+    length = regs.r[4];
+    attributes = regs.r[5];
+    if(type == 0) {
+        errno = ENOENT;
+        return -1;
+    }
+    memset(st, 0, sizeof(*st));
+    /* RISC OS does not provide inode numbers, so identify an object by path. */
+    for(part = (const unsigned char *)path->native_path; *part; part++) {
+        identity_low = (identity_low ^ *part) * 16777619u;
+        identity_high = (identity_high ^ *part) * 2246822519u;
+    }
+    st->st_dev = (dev_t)identity_high;
+    st->st_ino = (ino_t)identity_low;
+    st->st_mode = type == 2 || type == 3 ? S_IFDIR : S_IFREG;
+    if(attributes & 1) st->st_mode |= 0400;
+    if(attributes & 2) st->st_mode |= 0200;
+    if(attributes & 16) st->st_mode |= 0044;
+    if(attributes & 32) st->st_mode |= 0022;
+    if(S_ISDIR(st->st_mode)) {
+        /* Some filing systems report no attributes for a volume root. */
+        if(!(attributes & 0x33))
+            st->st_mode |= 0755;
+        else
+            st->st_mode |= (st->st_mode & 0444) >> 2;
+    }
+    st->st_size = (unsigned int)length;
+    if(((unsigned int)load & 0xfff00000u) == 0xfff00000u) {
+        centiseconds = (((unsigned long long)(unsigned int)load & 0xffu) << 32) |
+                       (unsigned int)exec;
+        if(centiseconds >= 220898880000ULL)
+            st->st_mtime = (time_t)(centiseconds / 100 - 2208988800ULL);
+    }
+    st->st_atime = st->st_mtime;
+    return 0;
+#else
+    return lstat(path->native_path, st);
 #endif
-    return result;
 }
 
 int platform_lstat_child(PlatformDir *directory, const ResolvedPath *path,
