@@ -237,12 +237,7 @@ void fs_open(Ixp9Req *r) {
     state->remove_on_close = !!(r->ifcall.topen.mode & P9_ORCLOSE);
     state->opened_stat = st;
     state->stat_valid = 1;
-    r->fid->qid.type = S_ISDIR(st.st_mode) ? P9_QTDIR :
-                       S_ISLNK(st.st_mode) ? P9_QTSYMLINK : P9_QTFILE;
-    r->fid->qid.path = resolved.synthetic ? namespace_root_qid()
-                                           : namespace_qid(&resolved, &st);
-    r->fid->qid.version = resolved.synthetic ? namespace.generation
-                                             : qid_version(&st);
+    set_qid(&r->fid->qid, &resolved, &st);
     r->ofcall.ropen.qid = r->fid->qid;
     ixp_respond(r, nil);
 }
@@ -440,11 +435,8 @@ void fs_create(Ixp9Req *r) {
     state->remove_on_close = !!(r->ifcall.tcreate.mode & P9_ORCLOSE);
     state->opened_stat = st;
     state->stat_valid = 1;
-    r->fid->qid.type = is_directory ? P9_QTDIR :
-                       is_symlink ? P9_QTSYMLINK : P9_QTFILE;
-    r->fid->qid.path = namespace_qid(&resolved, &st);
     qid_bump();
-    r->fid->qid.version = qid_version(&st);
+    set_qid(&r->fid->qid, &resolved, &st);
     r->ofcall.rcreate.qid = r->fid->qid;
     r->ofcall.rcreate.iounit = 0;
     s9_free(link_copy);

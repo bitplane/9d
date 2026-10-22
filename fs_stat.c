@@ -67,10 +67,7 @@ int build_stat(IxpStat *s, const char *path, const ResolvedPath *resolved,
                const struct stat *st,
                const char *symlink_target) {
     memset(s, 0, sizeof(*s));
-    s->qid.type = S_ISDIR(st->st_mode) ? P9_QTDIR :
-                  S_ISLNK(st->st_mode) ? P9_QTSYMLINK : P9_QTFILE;
-    s->qid.path = namespace_qid(resolved, st);
-    s->qid.version = qid_version(st);
+    set_qid(&s->qid, resolved, st);
     s->mode = p9_mode(st->st_mode);
     s->atime = (uint32_t)st->st_atime;
     s->mtime = (uint32_t)st->st_mtime;
@@ -108,9 +105,7 @@ int build_stat(IxpStat *s, const char *path, const ResolvedPath *resolved,
 
 int build_synthetic_stat(IxpStat *s, const char *name) {
     memset(s, 0, sizeof(*s));
-    s->qid.type = P9_QTDIR;
-    s->qid.path = namespace_root_qid();
-    s->qid.version = namespace.generation;
+    set_synthetic_qid(&s->qid);
     s->mode = P9_DMDIR | 0555;
     s->name = s9_strdup(name);
     s->uid = s9_strdup("none");

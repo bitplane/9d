@@ -61,12 +61,16 @@ char *read_symlink_target(const ResolvedPath *path, size_t hint,
     }
 }
 
-static void set_qid(IxpQid *qid, const ResolvedPath *resolved,
-                    const struct stat *st) {
+void set_synthetic_qid(IxpQid *qid) {
+    qid->type = P9_QTDIR;
+    qid->path = namespace_root_qid();
+    qid->version = namespace.generation;
+}
+
+void set_qid(IxpQid *qid, const ResolvedPath *resolved,
+              const struct stat *st) {
     if(resolved->synthetic) {
-        qid->type = P9_QTDIR;
-        qid->path = namespace_root_qid();
-        qid->version = namespace.generation;
+        set_synthetic_qid(qid);
         return;
     }
     qid->type = P9_QTFILE;

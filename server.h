@@ -77,6 +77,8 @@ void fid_state_register(FidState *state);
 void fid_state_unregister(FidState *state);
 void fid_state_close(FidState *state);
 uint32_t qid_version(const struct stat *st);
+void set_qid(IxpQid *qid, const ResolvedPath *resolved, const struct stat *st);
+void set_synthetic_qid(IxpQid *qid);
 void qid_bump(void);
 void nined_state_cleanup(void);
 void respond_errno(Ixp9Req *r, int error);
