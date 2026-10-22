@@ -16,7 +16,6 @@ make NETWORK=1 >/dev/null
 	| grep -q 'default: tcp!localhost!564'
 nm build/9d | grep -q '[[:space:]]ixp_announce$'
 
-make clean >/dev/null
 make NETWORK=0 CFLAGS=-Os >/dev/null
 if ./build/9d -h 2>&1 \
 		| grep -q 'Otherwise listen on a libixp network address'; then
@@ -28,14 +27,26 @@ if nm build/9d | grep -q '[[:space:]]ixp_announce$'; then
 	exit 1
 fi
 for object in rpc socket client; do
-	if test -e "build/libixp/$object.o"; then
-		echo "Network-only libixp object built with NETWORK=0: $object.o" >&2
+	if ar t build/libixp.a | grep -q "^$object.o$"; then
+		echo "Network-only object retained with NETWORK=0: $object.o" >&2
 		exit 1
 	fi
 done
 
-make clean >/dev/null
+# Switch back without cleaning, including platform-specific shared flags.
+make NETWORK=1 PLATFORM=riscos STATIC=0 >/dev/null
+if nm -u build/fs_io.o | grep -q '[[:space:]]pread$'; then
+	echo 'RISC OS build retained POSIX positioned I/O' >&2
+	exit 1
+fi
+make NETWORK=1 PLATFORM=posix STATIC=0 >/dev/null
+nm -u build/fs_io.o | grep -q '[[:space:]]pread$'
+./build/9d -h 2>&1 | grep -q 'Otherwise listen on a libixp network address'
+
+# A changed fid limit must rebuild both the server and its test client.
+make STATIC=0 MAX_FIDS=512 test-protocol >/dev/null
+make STATIC=0 MAX_FIDS=1024 test-protocol >/dev/null
+
 make NETWORK=0 PLATFORM=posix THREAD_LIBS= STATIC=0 >/dev/null
 
-make clean >/dev/null
 make NETWORK=0 LINK.c="sh $(pwd)/test/link.sh" STATIC=0 >/dev/null

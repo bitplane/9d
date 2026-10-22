@@ -62,6 +62,18 @@ endif
 
 all: $(TARGET)
 
+# Keep command-line configuration changes visible to make's timestamp graph.
+CONFIG_VARS = PLATFORM NETWORK CC AR CPPFLAGS CFLAGS LIBIXP_CFLAGS \
+	DEPFLAGS LDFLAGS THREAD_LIBS LINK.c
+shell_quote = '$(subst ','"'"',$(1))'
+build/config: FORCE | build
+	@printf '%s\n' $(foreach name,$(CONFIG_VARS),$(call shell_quote,$(name)=$($(name)))) > $@.tmp
+	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
+
+$(OBJS) $(LIBIXP_OBJS) $(TARGET) build/libixp.a \
+	build/namespace_test build/allocation_test build/protocol_test \
+	build/9d-riscos build/9d-synthetic build/platform_posix-synthetic.o: build/config
+
 $(TARGET): $(OBJS) build/libixp.a
 	$(LINK.c) -o $@ $(OBJS) $(LIBS)
 
@@ -84,6 +96,7 @@ build/libixp/%.o: libixp/lib/libixp/%.c | build/libixp
 		-Ilibixp/include -c $< -o $@
 
 build/libixp.a: $(LIBIXP_OBJS)
+	rm -f $@
 	$(AR) rcs $@ $(LIBIXP_OBJS)
 
 build build/libixp:
