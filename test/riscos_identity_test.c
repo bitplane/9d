@@ -80,6 +80,15 @@ int main(void) {
         assert(same(next, &file));
         assert(riscos_identity_rename(next, "FS:tree") == 0);
     }
+    {
+        char too_long[S9_PATH_MAX + 1];
+        memset(too_long, 'x', sizeof(too_long) - 1);
+        too_long[sizeof(too_long) - 1] = '\0';
+        assert(riscos_identity_rename("FS:tree", too_long) == -1);
+        assert(errno == ENAMETOOLONG);
+        assert(access("FS:tree", F_OK) == 0);
+        assert(same("FS:tree", &file));
+    }
     riscos_identity_cleanup();
     assert(same("FS:old", &file));
     assert(unlink("FS:tree") == 0);

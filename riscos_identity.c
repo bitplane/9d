@@ -88,7 +88,7 @@ void riscos_identity_cleanup(void) {
 static char *append(const char *prefix, const char *suffix) {
     size_t a = strlen(prefix), b = strlen(suffix);
     char *result;
-    if(a > SIZE_MAX - b - 1) {
+    if(a >= S9_PATH_MAX || b >= S9_PATH_MAX - a) {
         errno = ENAMETOOLONG;
         return NULL;
     }
@@ -112,7 +112,7 @@ static int add_path(IdentityPath **list, size_t *count,
     if(!entry)
         return -1;
     entry->path = append(path, suffix);
-    entry->origin = s9_strdup(origin);
+    entry->origin = append(origin, "");
     if(!entry->path || !entry->origin) {
         s9_free(entry->path);
         s9_free(entry->origin);
@@ -141,7 +141,7 @@ int riscos_identity_rename(const char *old_path, const char *new_path) {
         return -1;
     }
     origin = source ? append(source->origin, old_path + strlen(source->path))
-                    : s9_strdup(old_path);
+                    : append(old_path, "");
     if(!origin)
         return -1;
     /* Prepare everything before touching the filesystem. At capacity a rename
