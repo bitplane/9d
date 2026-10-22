@@ -75,7 +75,7 @@ build/config: FORCE | build
 
 $(OBJS) $(LIBIXP_OBJS) $(TARGET) build/libixp.a \
 	build/namespace_test build/allocation_test build/protocol_test \
-	build/9d-riscos build/9d-synthetic build/platform_posix-synthetic.o: build/config
+	build/9d-riscos-fallback build/9d-synthetic build/platform_posix-synthetic.o: build/config
 
 $(TARGET): $(OBJS) build/libixp.a
 	$(LINK.c) -o $@ $(OBJS) $(LIBS)
@@ -134,7 +134,7 @@ test: test/9pfuse/build/9pfuse
 	$(MAKE) test-stream
 	$(MAKE) test-namespace
 	$(MAKE) test-allocations
-	$(MAKE) test-riscos-identity
+	$(MAKE) test-riscos-identity test-riscos-native
 	$(MAKE) test-protocol
 	$(MAKE) $(TARGET)
 	cd test && ./run.sh
@@ -148,9 +148,9 @@ test-stream: $(TARGET)
 test-namespace: build/namespace_test
 	./build/namespace_test
 
-test-protocol: build/protocol_test build/9d build/9d-riscos build/9d-synthetic
+test-protocol: build/protocol_test build/9d build/9d-riscos-fallback build/9d-synthetic
 	./build/protocol_test ./build/9d ./build/9d-synthetic
-	./build/protocol_test ./build/9d-riscos
+	./build/protocol_test ./build/9d-riscos-fallback
 
 test-allocations: build/allocation_test
 	./build/allocation_test
@@ -167,7 +167,7 @@ build/riscos_identity_test: test/riscos_identity_test.c riscos_identity.c \
 check-warnings:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="$(WARNING_CFLAGS)" LIBIXP_CFLAGS="-g -O2 -w" LDFLAGS= \
-		test-namespace test-allocations test-riscos-identity test-protocol
+		test-namespace test-allocations test-riscos-identity test-riscos-native test-protocol
 
 check-sanitizers:
 	$(MAKE) clean
@@ -175,13 +175,13 @@ check-sanitizers:
 		$(MAKE) CFLAGS="$(SANITIZER_FLAGS)" \
 		LIBIXP_CFLAGS="$(SANITIZER_FLAGS) -w" \
 		LDFLAGS="-fsanitize=address,undefined" \
-		test-namespace test-allocations test-riscos-identity test-protocol
+		test-namespace test-allocations test-riscos-identity test-riscos-native test-protocol
 
 check-embedded:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="$(WARNING_CFLAGS) -DS9_PATH_MAX=$(EMBEDDED_PATH_MAX)" \
 		LIBIXP_CFLAGS="-g -O2 -w" LDFLAGS= \
-		test-namespace test-allocations test-riscos-identity test-protocol
+		test-namespace test-allocations test-riscos-identity test-riscos-native test-protocol
 
 build/namespace_test: test/namespace_test.c namespace.c namespace.h path.c \
 		alloc.c server.h | build
@@ -197,10 +197,11 @@ build/allocation_test: test/allocation_test.c alloc.c path.c namespace.c \
 		test/allocation_test.c alloc.c path.c namespace.c platform_posix.c \
 		fs_ops.c fs_stat.c $(LIBS)
 
-build/9d-riscos: 9d.c alloc.c path.c namespace.c platform_riscos.c \
+build/9d-riscos-fallback: 9d.c alloc.c path.c namespace.c platform_riscos.c \
 		fs_ops.c fs_io.c fs_stat.c fs_dir.c server.h namespace.h \
 		platform.h build/libixp.a | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ \
+		-DS9_NO_PREAD -DS9_NO_FUTIMENS \
 		9d.c alloc.c path.c namespace.c platform_riscos.c \
 		fs_ops.c fs_io.c fs_stat.c fs_dir.c $(LIBS)
 
@@ -224,3 +225,18 @@ build/9d-synthetic: 9d.c alloc.c path.c namespace.c \
 .PHONY: all deps clean distclean release dist test test-build-options \
 	test-namespace test-protocol test-allocations check-warnings \
 	check-sanitizers check-embedded test-riscos-identity
+
+.PHONY: test-riscos-native test-stream
+test-riscos-native: build/riscos_native_test
+	./build/riscos_native_test
+
+build/riscos_native_test: test/riscos_native_test.c 9d.c alloc.c path.c \
+		namespace.c platform_riscos.c riscos_identity.c \
+		fs_ops.c fs_io.c fs_stat.c fs_dir.c $(wildcard *.h) \
+		$(wildcard test/riscos/include/*.h test/riscos/include/unixlib/*.h) \
+		build/libixp.a build/config | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -D__riscos__ -D_DEFAULT_SOURCE \
+		-DS9_NO_PREAD -DS9_NO_FUTIMENS -Itest/riscos/include -o $@ \
+		test/riscos_native_test.c alloc.c path.c namespace.c \
+		platform_riscos.c riscos_identity.c fs_ops.c fs_io.c fs_stat.c fs_dir.c \
+		$(LIBS)

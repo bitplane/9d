@@ -153,18 +153,18 @@ int platform_lstat(const ResolvedPath *path, struct stat *st) {
     }
     memset(&regs, 0, sizeof(regs));
     regs.r[0] = 5;
-    regs.r[1] = (int)native;
+    regs.r[1] = (intptr_t)native;
     if(_kernel_swi(OS_File, &regs, &regs) != NULL) {
         /* Some filing systems reject OS_File on their volume root but
          * enumerate that root through OS_GBPB. */
         char first[S9_PATH_MAX];
         memset(&regs, 0, sizeof(regs));
         regs.r[0] = 9;
-        regs.r[1] = (int)native;
-        regs.r[2] = (int)first;
+        regs.r[1] = (intptr_t)native;
+        regs.r[2] = (intptr_t)first;
         regs.r[3] = 1;
         regs.r[4] = 0;
-        regs.r[5] = sizeof(first);
+        regs.r[5] = (int)sizeof(first);
         if(_kernel_swi(OS_GBPB, &regs, &regs) != NULL) {
             errno = EIO;
             return -1;
@@ -172,11 +172,11 @@ int platform_lstat(const ResolvedPath *path, struct stat *st) {
         type = 3;
         load = exec = length = attributes = 0;
     } else {
-        type = regs.r[0];
-        load = regs.r[2];
-        exec = regs.r[3];
-        length = regs.r[4];
-        attributes = regs.r[5];
+        type = (int)regs.r[0];
+        load = (int)regs.r[2];
+        exec = (int)regs.r[3];
+        length = (int)regs.r[4];
+        attributes = (int)regs.r[5];
     }
     if(type == 0) {
         errno = ENOENT;
@@ -315,11 +315,11 @@ struct dirent *platform_readdir(PlatformDir *directory) {
     }
     memset(&regs, 0, sizeof(regs));
     regs.r[0] = 9;
-    regs.r[1] = (int)directory->native;
-    regs.r[2] = (int)name;
+    regs.r[1] = (intptr_t)directory->native;
+    regs.r[2] = (intptr_t)name;
     regs.r[3] = 1;
     regs.r[4] = directory->position;
-    regs.r[5] = sizeof(name);
+    regs.r[5] = (int)sizeof(name);
     error = _kernel_swi(OS_GBPB, &regs, &regs);
     if(error) {
         errno = EIO;

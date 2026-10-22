@@ -1211,7 +1211,8 @@ static void test_qid_mutations(Client *client) {
     assert(root_after.version != root_before.version);
 }
 
-static void test_partial_wstat_qid(Client *client, const char *root) {
+static void test_partial_wstat_qid(Client *client, const char *root,
+                                   int path_times) {
     const char *name[] = { "partial-wstat" };
     IxpFcall response;
     IxpStat stat;
@@ -1259,11 +1260,17 @@ static void test_partial_wstat_qid(Client *client, const char *root) {
     stat.length = 2;
     stat.mtime = 1000000002;
     response = wstat_fid(client, 122, &stat);
-    expect_type("ftruncate-style wstat on an open fid", &response, P9_RWStat);
+    if(path_times)
+        expect_error("path-based times cannot update an unlinked file",
+                     &response, ENOENT);
+    else
+        expect_type("ftruncate-style wstat on an open fid", &response, P9_RWStat);
     ixp_freefcall(&response);
     stat = unpack_stat(client, 122);
     assert(stat.length == 2);
-    assert(stat.mtime == 1000000002);
+    assert(stat.qid.version != before.version);
+    if(!path_times)
+        assert(stat.mtime == 1000000002);
     ixp_freestat(&stat);
     response = read_fid(client, 122, 0, sizeof(data));
     expect_type("read truncated file", &response, P9_RRead);
@@ -1895,7 +1902,7 @@ int main(int argc, char **argv) {
     test_containment(&client, outside);
     test_orclose_and_exec(&client, root);
     test_qid_mutations(&client);
-    test_partial_wstat_qid(&client, root);
+    test_partial_wstat_qid(&client, root, strstr(argv[1], "riscos") != NULL);
     test_special_files(&client, root, strstr(argv[1], "riscos") != NULL);
     test_parent_cache(&client, root);
     test_create_inherits(&client, root);
