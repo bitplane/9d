@@ -1,0 +1,33 @@
+name: Checks
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - check-warnings
+          - check-sanitizers
+          - check-embedded
+          - test-build-options
+          - test-stream
+    steps:
+      - uses: actions/checkout@v6
+      - name: Fetch pinned dependencies
+        run: make deps
+      - name: Run ${{ matrix.target }}
+        run: make "${{ matrix.target }}"
