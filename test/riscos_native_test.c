@@ -189,6 +189,21 @@ static void test_native_directory(void) {
     assert(platform_closedir(directory) == 0);
 }
 
+static void test_native_paths(void) {
+    char path[64];
+    assert(platform_joinpath(path, sizeof(path), "SCSI::0.$", "/") == 0);
+    assert(strcmp(path, "SCSI::0.$") == 0);
+    assert(platform_joinpath(path, sizeof(path), "SCSI::0.$", "dir/file.txt") == 0);
+    assert(strcmp(path, "SCSI::0.$.dir.file/txt") == 0);
+    assert(platform_joinpath(path, sizeof(path), "NetFS:", "/file.txt") == 0);
+    assert(strcmp(path, "NetFS:file/txt") == 0);
+    assert(platform_joinpath(path, 5, "NetFS:", "file") == -1);
+    assert(platform_joinpath(path, 10, "NetFS:", "file") == -1);
+    assert(platform_joinpath(path, 11, "NetFS:", "file") == 0);
+    assert(platform_joinpath(path, sizeof(path), "/unix", "file.txt") == 0);
+    assert(strcmp(path, "/unix/file.txt") == 0);
+}
+
 static void test_serial_retry(void) {
     unsigned char bytes[256];
     for(unsigned i = 0; i < sizeof(bytes); i++)
@@ -206,6 +221,7 @@ static void test_serial_retry(void) {
 int main(void) {
     test_native_metadata();
     test_native_directory();
+    test_native_paths();
     test_serial_retry();
     namespace_cleanup();
     puts("RISC OS native adapter fixtures passed");

@@ -89,7 +89,6 @@ char *read_symlink_target(const ResolvedPath *path, size_t hint,
 /* Path functions */
 void cleanname(char *name);
 const char *path_basename(const char *path);
-int joinpath(char *dst, size_t dstsize, const char *dir, const char *name);
 
 /* Filesystem operations */
 void fs_attach(Ixp9Req *r);

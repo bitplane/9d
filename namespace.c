@@ -300,7 +300,7 @@ int namespace_resolve(const char *path, ResolvedPath *resolved) {
             return -1;
         }
         strcpy(resolved->relative_path, name);
-        if(joinpath(resolved->native_path, sizeof(resolved->native_path),
+        if(platform_joinpath(resolved->native_path, sizeof(resolved->native_path),
                     namespace.native_root, cleaned) < 0) {
             errno = ENAMETOOLONG;
             return -1;
@@ -338,7 +338,7 @@ int namespace_resolve(const char *path, ResolvedPath *resolved) {
         return -1;
     }
     strcpy(resolved->relative_path, remainder + 1);
-    if(joinpath(resolved->native_path, sizeof(resolved->native_path),
+    if(platform_joinpath(resolved->native_path, sizeof(resolved->native_path),
                 namespace.roots[index].path,
                 remainder + 1) < 0) {
         errno = ENAMETOOLONG;

@@ -9,6 +9,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+int platform_joinpath(char *dst, size_t size, const char *dir,
+                       const char *name) {
+    return joinpath(dst, size, dir, name);
+}
+
 int platform_namespace_init(Namespace *ns) {
     return namespace_use_native(ns, "/");
 }
@@ -29,6 +34,12 @@ void platform_namespace_cleanup(Namespace *ns) {
 
 static void test_native_namespace(const char *root) {
     ResolvedPath resolved;
+    char joined[64];
+
+    assert(platform_joinpath(joined, sizeof(joined), "/volume:", "file") == 0);
+    assert(strcmp(joined, "/volume:/file") == 0);
+    assert(platform_joinpath(joined, sizeof(joined), "/volume/", "/file") == 0);
+    assert(strcmp(joined, "/volume/file") == 0);
 
     assert(strcmp(path_basename("/volume/file"), "file") == 0);
     assert(strcmp(path_basename("/volume"), "volume") == 0);

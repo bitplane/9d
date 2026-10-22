@@ -15,6 +15,20 @@
 #include <unistd.h>
 #include <utime.h>
 
+int platform_joinpath(char *dst, size_t size, const char *dir,
+                       const char *name) {
+    size_t length;
+    if(!dst || !dir || !name || !size)
+        return -1;
+    length = strlen(dir);
+    if(length && dir[length - 1] == ':') {
+        while(*name == '/')
+            name++;
+        return snprintf(dst, size, "%s%s", dir, name) >= (int)size ? -1 : 0;
+    }
+    return joinpath(dst, size, dir, name);
+}
+
 typedef struct VolumeName {
     struct VolumeName *next;
     char name[256];

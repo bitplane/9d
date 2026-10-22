@@ -17,6 +17,39 @@
 #include <unixlib/local.h>
 #endif
 
+int platform_joinpath(char *dst, size_t size, const char *dir,
+                       const char *name) {
+#ifdef __riscos__
+    size_t dirlen;
+    if(!dst || !dir || !name || !size)
+        return -1;
+    dirlen = strlen(dir);
+    /* FileSwitch uses dots between native path components and slashes
+     * inside leaf names where Unix paths use full stops. */
+    if(strchr(dir, ':')) {
+        size_t used = dirlen;
+        if(used >= size)
+            return -1;
+        memcpy(dst, dir, used);
+        while(*name == '/')
+            name++;
+        if(*name && used && dst[used - 1] != ':') {
+            if(used + 1 >= size)
+                return -1;
+            dst[used++] = '.';
+        }
+        for(; *name; name++) {
+            if(used + 1 >= size)
+                return -1;
+            dst[used++] = *name == '/' ? '.' : *name == '.' ? '/' : *name;
+        }
+        dst[used] = '\0';
+        return 0;
+    }
+#endif
+    return joinpath(dst, size, dir, name);
+}
+
 void platform_namespace_cleanup(Namespace *ns) {
     (void)ns;
 #ifdef __riscos__

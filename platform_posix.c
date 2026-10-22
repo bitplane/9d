@@ -23,6 +23,11 @@
 #undef F_DUPFD_CLOEXEC
 #endif
 
+int platform_joinpath(char *dst, size_t size, const char *dir,
+                       const char *name) {
+    return joinpath(dst, size, dir, name);
+}
+
 static int native_root = -1;
 
 static void cache_drop(void);

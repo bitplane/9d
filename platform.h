@@ -14,6 +14,10 @@ typedef struct PlatformDir PlatformDir;
 typedef DIR PlatformDir;
 #endif
 
+int platform_joinpath(char *dst, size_t size, const char *dir,
+                       const char *name);
+/* Shared slash-separated path helper for platform adapters. */
+int joinpath(char *dst, size_t size, const char *dir, const char *name);
 int platform_lstat(const ResolvedPath *path, struct stat *st);
 int platform_fstat(int fd, const ResolvedPath *path,
                     const struct stat *opened, struct stat *st);
