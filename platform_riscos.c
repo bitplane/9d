@@ -11,6 +11,7 @@
 #include <utime.h>
 
 #ifdef __riscos__
+#include "riscos_identity.h"
 #include <kernel.h>
 #include <swis.h>
 #include <unixlib/local.h>
@@ -18,6 +19,9 @@
 
 void platform_namespace_cleanup(Namespace *ns) {
     (void)ns;
+#ifdef __riscos__
+    riscos_identity_cleanup();
+#endif
 }
 
 int platform_namespace_ready(Namespace *ns) {
@@ -141,9 +145,6 @@ int platform_lstat(const ResolvedPath *path, struct stat *st) {
     char native[S9_PATH_MAX];
     int type, load, exec, length, attributes;
     unsigned long long centiseconds;
-    unsigned int identity_low = 2166136261u;
-    unsigned int identity_high = 0x9e3779b9u;
-    const unsigned char *part;
     _kernel_swi_regs regs;
 
     if(!__riscosify_std(path->native_path, 0, native, sizeof(native), NULL)) {
@@ -182,13 +183,7 @@ int platform_lstat(const ResolvedPath *path, struct stat *st) {
         return -1;
     }
     memset(st, 0, sizeof(*st));
-    /* RISC OS does not provide inode numbers, so identify an object by path. */
-    for(part = (const unsigned char *)path->native_path; *part; part++) {
-        identity_low = (identity_low ^ *part) * 16777619u;
-        identity_high = (identity_high ^ *part) * 2246822519u;
-    }
-    st->st_dev = (dev_t)identity_high;
-    st->st_ino = (ino_t)identity_low;
+    riscos_identity_stat(native, st);
     st->st_mode = type == 2 || type == 3 ? S_IFDIR : S_IFREG;
     if(attributes & 1) st->st_mode |= 0400;
     if(attributes & 2) st->st_mode |= 0200;
@@ -212,6 +207,32 @@ int platform_lstat(const ResolvedPath *path, struct stat *st) {
     return 0;
 #else
     return lstat(path->native_path, st);
+#endif
+}
+
+int platform_fstat(int fd, const ResolvedPath *path,
+                    const struct stat *opened, struct stat *st) {
+#ifdef __riscos__
+    struct stat native;
+    dev_t device = opened->st_dev;
+    ino_t inode = opened->st_ino;
+
+    if(platform_lstat(path, &native) == 0 &&
+       native.st_dev == device && native.st_ino == inode) {
+        *st = native;
+        return 0;
+    }
+    /* The pathname disappeared or was replaced. The descriptor still names
+     * the original file, but UnixLib's inode fields are not our identity. */
+    if(fstat(fd, st) < 0)
+        return -1;
+    st->st_dev = device;
+    st->st_ino = inode;
+    return 0;
+#else
+    (void)path;
+    (void)opened;
+    return fstat(fd, st);
 #endif
 }
 
@@ -402,7 +423,20 @@ int platform_rename(const ResolvedPath *old_path,
                     const ResolvedPath *new_path) {
     if(!path_allowed(old_path) || !path_allowed(new_path))
         return -1;
+#ifdef __riscos__
+    char old_native[S9_PATH_MAX];
+    char new_native[S9_PATH_MAX];
+    if(!__riscosify_std(old_path->native_path, 0, old_native,
+                        sizeof(old_native), NULL) ||
+       !__riscosify_std(new_path->native_path, 0, new_native,
+                        sizeof(new_native), NULL)) {
+        errno = EILSEQ;
+        return -1;
+    }
+    return riscos_identity_rename(old_native, new_native);
+#else
     return rename(old_path->native_path, new_path->native_path);
+#endif
 }
 
 int platform_chmod(const ResolvedPath *path, mode_t mode) {

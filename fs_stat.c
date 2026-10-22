@@ -145,7 +145,7 @@ static int state_stat(FidState *state, const ResolvedPath *resolved,
         return 0;
     }
     if(state->fd >= 0)
-        return fstat(state->fd, st);
+        return platform_fstat(state->fd, resolved, &state->opened_stat, st);
     if(state->dir) {
         if(platform_fstatdir(state->dir, st) == 0)
             return 0;

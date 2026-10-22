@@ -41,6 +41,9 @@ CPPFLAGS += -DS9_NO_PREAD -DS9_NO_FUTIMENS
 endif
 SRCS = 9d.c alloc.c path.c namespace.c platform_$(PLATFORM).c \
 	fs_ops.c fs_io.c fs_stat.c fs_dir.c
+ifeq ($(PLATFORM),riscos)
+SRCS += riscos_identity.c
+endif
 OBJS = $(patsubst %.c,build/%.o,$(SRCS))
 TARGET = build/9d
 LIBIXP_NAMES = convert error map message request server transport util timer \
@@ -131,6 +134,7 @@ test: test/9pfuse/build/9pfuse
 	$(MAKE) test-stream
 	$(MAKE) test-namespace
 	$(MAKE) test-allocations
+	$(MAKE) test-riscos-identity
 	$(MAKE) test-protocol
 	$(MAKE) $(TARGET)
 	cd test && ./run.sh
@@ -151,10 +155,19 @@ test-protocol: build/protocol_test build/9d build/9d-riscos build/9d-synthetic
 test-allocations: build/allocation_test
 	./build/allocation_test
 
+test-riscos-identity: build/riscos_identity_test
+	./build/riscos_identity_test
+
+build/riscos_identity_test: test/riscos_identity_test.c riscos_identity.c \
+		riscos_identity.h alloc.c build/config | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -DNINED_TESTING \
+		-DS9_RISCOS_RENAME_PATHS=8 -o $@ \
+		test/riscos_identity_test.c riscos_identity.c alloc.c
+
 check-warnings:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="$(WARNING_CFLAGS)" LIBIXP_CFLAGS="-g -O2 -w" LDFLAGS= \
-		test-namespace test-allocations test-protocol
+		test-namespace test-allocations test-riscos-identity test-protocol
 
 check-sanitizers:
 	$(MAKE) clean
@@ -162,13 +175,13 @@ check-sanitizers:
 		$(MAKE) CFLAGS="$(SANITIZER_FLAGS)" \
 		LIBIXP_CFLAGS="$(SANITIZER_FLAGS) -w" \
 		LDFLAGS="-fsanitize=address,undefined" \
-		test-namespace test-allocations test-protocol
+		test-namespace test-allocations test-riscos-identity test-protocol
 
 check-embedded:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="$(WARNING_CFLAGS) -DS9_PATH_MAX=$(EMBEDDED_PATH_MAX)" \
 		LIBIXP_CFLAGS="-g -O2 -w" LDFLAGS= \
-		test-namespace test-allocations test-protocol
+		test-namespace test-allocations test-riscos-identity test-protocol
 
 build/namespace_test: test/namespace_test.c namespace.c namespace.h path.c \
 		alloc.c server.h | build
@@ -210,4 +223,4 @@ build/9d-synthetic: 9d.c alloc.c path.c namespace.c \
 
 .PHONY: all deps clean distclean release dist test test-build-options \
 	test-namespace test-protocol test-allocations check-warnings \
-	check-sanitizers check-embedded
+	check-sanitizers check-embedded test-riscos-identity

@@ -220,7 +220,7 @@ void fs_open(Ixp9Req *r) {
         }
         if(flags & O_TRUNC) {
             qid_bump();
-            if(fstat(state->fd, &st) < 0) {
+            if(platform_fstat(state->fd, &resolved, &st, &st) < 0) {
                 int error = errno;
                 fid_state_close(state);
                 respond_errno(r, error);

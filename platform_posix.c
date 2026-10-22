@@ -217,6 +217,13 @@ int platform_lstat(const ResolvedPath *path, struct stat *st) {
     return result;
 }
 
+int platform_fstat(int fd, const ResolvedPath *path,
+                    const struct stat *opened, struct stat *st) {
+    (void)path;
+    (void)opened;
+    return fstat(fd, st);
+}
+
 int platform_lstat_child(PlatformDir *directory, const ResolvedPath *path,
                          const char *name, struct stat *st) {
     (void)path;

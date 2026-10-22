@@ -15,6 +15,8 @@ typedef DIR PlatformDir;
 #endif
 
 int platform_lstat(const ResolvedPath *path, struct stat *st);
+int platform_fstat(int fd, const ResolvedPath *path,
+                    const struct stat *opened, struct stat *st);
 int platform_lstat_child(PlatformDir *directory, const ResolvedPath *path,
                          const char *name, struct stat *st);
 int platform_open(const ResolvedPath *path, int flags, mode_t mode);
