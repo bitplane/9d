@@ -1485,6 +1485,49 @@ static void test_parent_cache(Client *client, const char *root) {
     ixp_freefcall(&response);
 }
 
+static void test_open_directory_identity(const char *binary) {
+    char tmp[] = "/tmp/9d-directory-XXXXXX";
+    char *root = mkdtemp(tmp);
+    char path[1024], moved[1024], leaf[1024];
+    const char *names[] = {"dir"};
+    const char *entries[] = {"old"};
+    IxpFcall response;
+    IxpQid before, after;
+    Client client;
+    pid_t child;
+
+    assert(root);
+    make_path(path, sizeof(path), root, "dir");
+    make_path(moved, sizeof(moved), root, "moved");
+    make_path(leaf, sizeof(leaf), root, "dir/old");
+    assert(mkdir(path, 0700) == 0);
+    write_pattern_file(leaf, 1);
+    child = start_server(binary, root, &client);
+    response = walk(&client, 1, 2, names, 1);
+    expect_type("walk", &response, P9_RWalk);
+    ixp_freefcall(&response);
+    response = open_fid(&client, 2, P9_OREAD);
+    expect_type("open", &response, P9_ROpen);
+    before = response.ropen.qid;
+    ixp_freefcall(&response);
+    assert(rename(path, moved) == 0);
+    assert(mkdir(path, 0755) == 0);
+    after = stat_qid(&client, 2);
+    assert(before.path == after.path);
+    response = read_fid(&client, 2, 0, 8192);
+    expect_type("read", &response, P9_RRead);
+    directory_names(&client, &response, entries, 1);
+    ixp_freefcall(&response);
+    make_path(leaf, sizeof(leaf), root, "moved/old");
+    assert(unlink(leaf) == 0);
+    assert(rmdir(moved) == 0);
+    assert(rmdir(path) == 0);
+    after = stat_qid(&client, 2);
+    assert(before.path == after.path);
+    stop_server(&client, child);
+    assert(rmdir(root) == 0);
+}
+
 static void test_read_only(const char *binary, const char *root) {
     const char *name[] = { "read-only" };
     IxpFcall response;
@@ -1857,6 +1900,7 @@ int main(int argc, char **argv) {
     test_parent_cache(&client, root);
     test_create_inherits(&client, root);
     stop_server(&client, child);
+    test_open_directory_identity(argv[1]);
     test_read_only(argv[1], root);
     if(argc == 3)
         test_synthetic_namespace(argv[2], first_root, second_root,

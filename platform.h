@@ -19,6 +19,8 @@ int platform_lstat_child(PlatformDir *directory, const ResolvedPath *path,
                          const char *name, struct stat *st);
 int platform_open(const ResolvedPath *path, int flags, mode_t mode);
 PlatformDir *platform_opendir(const ResolvedPath *path);
+/* Metadata for the opened directory; ENOTSUP requests the opening snapshot. */
+int platform_fstatdir(PlatformDir *directory, struct stat *st);
 struct dirent *platform_readdir(PlatformDir *directory);
 long platform_telldir(PlatformDir *directory);
 void platform_seekdir(PlatformDir *directory, long position);

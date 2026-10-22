@@ -217,9 +217,14 @@ int platform_lstat(const ResolvedPath *path, struct stat *st) {
 
 int platform_lstat_child(PlatformDir *directory, const ResolvedPath *path,
                          const char *name, struct stat *st) {
+#ifdef __riscos__
     (void)directory;
     (void)name;
     return platform_lstat(path, st);
+#else
+    (void)path;
+    return fstatat(dirfd(directory), name, st, AT_SYMLINK_NOFOLLOW);
+#endif
 }
 
 int platform_open(const ResolvedPath *path, int flags, mode_t mode) {
@@ -260,6 +265,17 @@ PlatformDir *platform_opendir(const ResolvedPath *path) {
     return directory;
 #else
     return path_allowed(path) ? opendir(path->native_path) : NULL;
+#endif
+}
+
+int platform_fstatdir(PlatformDir *directory, struct stat *st) {
+#ifdef __riscos__
+    (void)directory;
+    (void)st;
+    errno = ENOTSUP;
+    return -1;
+#else
+    return fstat(dirfd(directory), st);
 #endif
 }
 

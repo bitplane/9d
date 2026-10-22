@@ -146,8 +146,14 @@ static int state_stat(FidState *state, const ResolvedPath *resolved,
     }
     if(state->fd >= 0)
         return fstat(state->fd, st);
-    if(state->dir)
-        return platform_lstat(resolved, st);
+    if(state->dir) {
+        if(platform_fstatdir(state->dir, st) == 0)
+            return 0;
+        if(errno != ENOTSUP || !state->stat_valid)
+            return -1;
+        *st = state->opened_stat;
+        return 0;
+    }
     if(state->symlink && state->stat_valid) {
         *st = state->opened_stat;
         return 0;

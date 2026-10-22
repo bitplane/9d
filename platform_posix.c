@@ -253,6 +253,10 @@ PlatformDir *platform_opendir(const ResolvedPath *path) {
     return directory;
 }
 
+int platform_fstatdir(PlatformDir *directory, struct stat *st) {
+    return fstat(dirfd(directory), st);
+}
+
 struct dirent *platform_readdir(PlatformDir *directory) {
     return readdir(directory);
 }
